@@ -362,12 +362,18 @@ bool read_combat_object_vector(void *object_manager, void ***objects_out, std::i
 }
 
 void *combat_object_manager_from_game_manager(void *game_manager) {
-  if (game_manager == nullptr) {
+  if (game_manager == nullptr || !process_range_is_readable(game_manager, 0xb0)) {
     return nullptr;
   }
   void *const world = read_object_field<void *>(game_manager, 0xa8);
-  void *const player_zero = world == nullptr ? nullptr : read_object_field<void *>(world, 0xe0);
-  return player_zero == nullptr ? nullptr : read_object_field<void *>(player_zero, 0x10);
+  if (world == nullptr || !process_range_is_readable(world, 0xf0)) {
+    return nullptr;
+  }
+  void *const player_zero = read_object_field<void *>(world, 0xe0);
+  if (player_zero == nullptr || !process_range_is_readable(player_zero, 0x18)) {
+    return nullptr;
+  }
+  return read_object_field<void *>(player_zero, 0x10);
 }
 
 void reset_combat_causal_state() {
@@ -443,7 +449,17 @@ bool current_combat_capture_context(CombatCaptureContext *result) {
         value.state_epoch == 0) {
       continue;
     }
+    if (!process_range_is_readable(value.game_manager, 0x230)) {
+      continue;
+    }
+    void *const world = read_object_field<void *>(value.game_manager, 0xa8);
+    if (world == nullptr || !process_range_is_readable(world, 0x1e8)) {
+      continue;
+    }
     value.tick = g_game_state_tick == nullptr ? -1 : g_game_state_tick(value.game_manager);
+    if (value.tick < 0) {
+      continue;
+    }
     *result = value;
     return true;
   }

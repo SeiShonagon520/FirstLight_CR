@@ -36,3 +36,11 @@ bool install_native_touch_interceptor(std::uintptr_t libg_base, const NativeTouc
 
 NativeTouchSelectionSnapshot native_touch_selection_snapshot();
 void native_touch_clear_selection();
+
+// Directly inject touch events into Supercell's GameApp.nOnTouchEvent trampoline.
+// Bypasses Android framework InputManager / MotionEvent and requires no permissions.
+bool native_touch_inject(std::int32_t action, std::int32_t x, std::int32_t y, std::int32_t pointer_id = 0);
+bool is_native_touch_installed();
+void set_native_touch_java_vm(void *vm);
+void set_native_touch_layout_dimensions(std::int32_t width, std::int32_t height);
+void set_native_touch_controlled_owner(std::int32_t owner);

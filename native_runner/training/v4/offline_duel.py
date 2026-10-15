@@ -14,6 +14,7 @@ from ...contracts import ActionKind, ActionV1
 from ...cr_native_env import DEFAULT_HOST, DEFAULT_PORT, NATIVE_RENDER_SPEEDS, NativeClashEnv, RunnerError
 from ...match_factory import MatchConfig
 from ...rich_telemetry_adapter import RuntimeEffectCatalog
+from ...timeline import load_game_mode_timeline
 from .expert import FIRST_POLICY_DECISION_TICK, POLICY_DECISION_TICKS
 from .factory import production_semantic_bundle
 from .offline_agent import _rendered_action
@@ -47,11 +48,13 @@ def run_ai_duel(
     bundle = production_semantic_bundle()
     native = NativeClashEnv(host, port, timeout=30.0)
     native.public_card_play_events_from_combat_ring = True
+    timeline = load_game_mode_timeline(match.game_mode)
     environment = BattleEnvV1(
         native=native,
         card_catalog=bundle.native_card_catalog,
         semantic_subset_contract=bundle.semantic_subset_contract,
         effect_catalog=RuntimeEffectCatalog.from_catalog(bundle.native_effect_catalog),
+        mode_timeline=timeline,
     )
     sessions = []
     decisions = [0, 0]

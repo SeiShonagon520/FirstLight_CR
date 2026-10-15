@@ -3,3 +3,10 @@ line-length = 120
 
 [tool.ruff.format]
 skip-magic-trailing-comma = true
+
+[tool.pytest.ini_options]
+testpaths = ["native_runner/tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+

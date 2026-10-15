@@ -82,3 +82,48 @@ cr_combat_heal_entry:
     ret
 
     .size cr_combat_heal_entry, .-cr_combat_heal_entry
+
+    .align 2
+    .global probe_hooked_init_google_play_review
+    .type probe_hooked_init_google_play_review, %function
+
+// Cleanly suppress Google Play in-app review initialization on private server builds.
+probe_hooked_init_google_play_review:
+    cbz x8, 1f
+    str xzr, [x8]
+    str xzr, [x8, #8]
+1:
+    mov x0, #0
+    ret
+
+    .size probe_hooked_init_google_play_review, .-probe_hooked_init_google_play_review
+
+    .align 2
+    .global probe_hooked_request_google_play_review
+    .type probe_hooked_request_google_play_review, %function
+
+// Cleanly suppress Google Play in-app review request flow after match end.
+probe_hooked_request_google_play_review:
+    cbz x8, 1f
+    str xzr, [x8]
+    str xzr, [x8, #8]
+1:
+    mov x0, #0
+    ret
+
+    .size probe_hooked_request_google_play_review, .-probe_hooked_request_google_play_review
+
+    .align 2
+    .global probe_hooked_task_add_on_complete_listener
+    .type probe_hooked_task_add_on_complete_listener, %function
+
+// Cleanly suppress Google Play Task addOnCompleteListener on private server builds.
+probe_hooked_task_add_on_complete_listener:
+    cbz x8, 1f
+    str xzr, [x8]
+    str xzr, [x8, #8]
+1:
+    mov x0, #0
+    ret
+
+    .size probe_hooked_task_add_on_complete_listener, .-probe_hooked_task_add_on_complete_listener

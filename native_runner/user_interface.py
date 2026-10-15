@@ -26,6 +26,15 @@ import threading
 import time
 from typing import Any, Callable, Mapping, Sequence
 
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+except ImportError:
+    tk = None  # type: ignore[assignment]
+    ttk = None  # type: ignore[assignment]
+    messagebox = None  # type: ignore[assignment]
+    filedialog = None  # type: ignore[assignment]
+
 from .paths import REPOSITORY_ROOT, WORKSPACE_ROOT
 from .card_names import CARD_NAMES
 from .contracts import COMPETITIVE_TOWER_TROOP_IDS
@@ -34,6 +43,7 @@ from .local_config import setting
 PACKAGE_ROOT = Path(__file__).resolve().parent
 MUMU_MANAGER = Path(setting("CR_MUMU_MANAGER", "MuMuManager.exe"))
 START_OFFLINE_SCRIPT = PACKAGE_ROOT / "start_offline.ps1"
+ONLINE_SESSION_SCRIPT = PACKAGE_ROOT / "online_session.ps1"
 VM_INDEX = int(setting("CR_VM_INDEX", "-1"))
 VM_NAME = setting("CR_VM_NAME")
 ADB_SERIAL = setting("CR_ADB_SERIAL")
@@ -60,6 +70,14 @@ TOWER_TROOP_OPTIONS = (
 )
 TOWER_TROOP_BY_NAME = dict(TOWER_TROOP_OPTIONS)
 TOWER_TROOP_BY_ID = {card_id: name for name, card_id in TOWER_TROOP_OPTIONS}
+DUEL_GAME_MODES = (
+    ("常规天梯 (1v1)", 72000006),
+    ("7倍圣水无限火力 (7x Elixir)", 72000493),
+    ("疯狂加速模式 (Ramp Up)", 72000500),
+    ("全觉醒大战 (All Evolution)", 72000491),
+    ("圣水桶模式 (Elixir Barrel)", 72000384),
+)
+DUEL_GAME_MODE_BY_NAME = dict(DUEL_GAME_MODES)
 
 
 def validate_model_deck_roles(forms: Sequence[int]) -> None:
@@ -77,10 +95,94 @@ def validate_model_deck_roles(forms: Sequence[int]) -> None:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class BuiltinDeck:
+    name: str
+    deck: tuple[int, ...]
+    forms: tuple[int, ...]
+    tower_troop_id: int = 159_000_000
+    description: str = ""
+
+
+# 预设现代天梯高胜率卡组（15 版本 / 觉醒时代热门主流体系）
+BUILTIN_DECKS = (
+    BuiltinDeck(
+        "2.6 经典速猪 (觉醒加农炮+小骷髅)",
+        (26000021, 28000000, 28000011, 27000000, 26000014, 26000030, 26000038, 26000010),
+        (0, 0, 0, 1, 0, 0, 0, 1),
+        159_000_000,
+        "天梯常青树极速过牌防反，觉醒加农炮高额输出 + 觉醒小骷髅无限分裂防守",
+    ),
+    BuiltinDeck(
+        "皮卡攻城槌 (觉醒皮卡+攻城槌)",
+        (26000004, 26000036, 26000050, 26000093, 26000046, 26000042, 28000008, 28000009),
+        (1, 1, 0, 0, 0, 0, 0, 0),
+        159_000_000,
+        "强力桥头压制，觉醒大皮卡击杀吸血回血 + 觉醒攻城槌弹飞防守单位强撞破塔",
+    ),
+    BuiltinDeck(
+        "皇家巨人速转 (觉醒家驹+猎人)",
+        (26000024, 26000061, 26000044, 26000010, 26000030, 28000000, 28000011, 26000050),
+        (1, 0, 1, 0, 0, 0, 0, 0),
+        159_000_000,
+        "顶级稳定推进体系，觉醒家驹自带开炮震退击飞，渔夫猎人铜墙铁壁反制大单位",
+    ),
+    BuiltinDeck(
+        "钻头迫击炮 (觉醒钻机+迫击炮)",
+        (27000013, 27000002, 26000000, 26000040, 26000010, 28000009, 28000011, 26000064),
+        (1, 1, 0, 0, 0, 0, 0, 0),
+        159_000_001,
+        "双进攻核心骚扰消耗流，觉醒钻机地下突袭 + 觉醒迫击炮发射哥布林持续压制",
+    ),
+    BuiltinDeck(
+        "经典龙骑毒墓 (觉醒骑士+飞龙宝宝)",
+        (28000010, 28000009, 26000000, 26000015, 26000039, 27000009, 28000015, 28000012),
+        (0, 0, 1, 1, 0, 0, 0, 0),
+        159_000_000,
+        "控制防守反击天花板，觉醒骑士减伤承伤 + 觉醒飞龙大范围清场，反手毒药墓园致命破塔",
+    ),
+    BuiltinDeck(
+        "超骑攻城炸弹人 (觉醒超骑+炸弹人)",
+        (26000055, 26000058, 26000032, 26000049, 26000040, 26000041, 28000008, 28000000),
+        (1, 1, 0, 0, 0, 0, 0, 0),
+        159_000_002,
+        "极强压制与极限抢血，觉醒超骑上勾拳抓人击飞 + 觉醒双炸弹人二次爆破轰击",
+    ),
+    BuiltinDeck(
+        "雷电巨人牢笼 (觉醒牢笼+飞龙宝宝)",
+        (26000085, 27000012, 26000035, 26000042, 26000015, 28000007, 28000012, 28000015),
+        (0, 1, 0, 0, 1, 0, 0, 0),
+        159_000_000,
+        "稳健重装推进，觉醒牢笼反手硬汉搏击，雷电巨人配合大电飓风粉碎一切防守人海",
+    ),
+    BuiltinDeck(
+        "皇家卫队双猪流 (觉醒卫队+皇家野猪)",
+        (26000047, 26000059, 27000012, 26000064, 26000002, 26000057, 28000001, 28000011),
+        (1, 1, 0, 0, 0, 0, 0, 0),
+        159_000_001,
+        "双路分推大师，觉醒卫队全图横排推线附带冲锋伤害，觉醒皇家野猪分路高额偷塔",
+    ),
+    BuiltinDeck(
+        "经典自闭飞桶 (觉醒飞桶+女武神)",
+        (28000004, 26000026, 26000040, 26000041, 26000011, 27000006, 28000011, 28000003),
+        (1, 0, 0, 0, 1, 0, 0, 0),
+        159_000_000,
+        "法术诱导自闭流鼻祖，觉醒飞桶真假假分身迷惑对手，觉醒女武神旋风引力聚怪防守",
+    ),
+    BuiltinDeck(
+        "狂暴精锐突袭 (觉醒精锐+攻城槌)",
+        (26000043, 26000036, 26000035, 26000042, 26000049, 28000002, 28000001, 26000038),
+        (1, 1, 0, 0, 0, 0, 0, 0),
+        159_000_000,
+        "极致暴力肉搏冲锋，觉醒精锐狂战横扫 + 觉醒攻城槌强力击退，一波狂暴直接推平",
+    ),
+)
+BUILTIN_DECK_BY_NAME = {d.name: d for d in BUILTIN_DECKS}
+
 SPEED_XBOW_DECK = (27000008, 26000000, 26000001, 27000006, 26000010, 26000084, 28000000, 28000011)
 SPEED_XBOW_FORMS = (0, 2, 1, 1, 0, 0, 0, 0)
-PEKKA_BRIDGE_SPAM_DECK = (26000036, 26000050, 26000062, 26000004, 26000046, 26000042, 28000000, 28000008)
-PEKKA_BRIDGE_SPAM_FORMS = (1, 1, 2, 0, 0, 0, 0, 0)
+PEKKA_BRIDGE_SPAM_DECK = BUILTIN_DECKS[1].deck
+PEKKA_BRIDGE_SPAM_FORMS = BUILTIN_DECKS[1].forms
 
 
 LOGGER = logging.getLogger("firstlight_interface")
@@ -490,6 +592,52 @@ def ensure_offline_runner(progress: Callable[[str], None], *, force_restart: boo
     progress("离线 native runner 已就绪。")
 
 
+def set_online_session(
+    progress: Callable[[str], None], *, restore_offline: bool = False, no_launch: bool = False
+) -> dict[str, Any]:
+    if not ONLINE_SESSION_SCRIPT.is_file():
+        raise FileNotFoundError(ONLINE_SESSION_SCRIPT)
+    progress("正在恢复离线隔离模式…" if restore_offline else "正在开启在线实战模式（解除网络限制并配置端口）…")
+    args = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        os.fspath(ONLINE_SESSION_SCRIPT),
+        "-VmIndex",
+        str(VM_INDEX),
+        "-VmName",
+        VM_NAME,
+        "-Serial",
+        ADB_SERIAL,
+        "-ControlPort",
+        str(CONTROL_PORT),
+    ]
+    if restore_offline:
+        args.append("-RestoreOffline")
+    if no_launch:
+        args.append("-NoLaunch")
+    result = _run_hidden(args, timeout=90.0)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(detail or "online_session.ps1 执行失败")
+    progress("已恢复离线隔离。" if restore_offline else "在线模式已开启，探针端口已转发。")
+    try:
+        return json.loads(result.stdout.strip())
+    except Exception:
+        return {}
+
+
+def ensure_online_session(progress: Callable[[str], None]) -> dict[str, Any]:
+    touch_test = _probe_native("live-touch-api")
+    if touch_test is not None and touch_test.get("ok"):
+        progress("在线探针与触控 API 已就绪。")
+        return {"ok": True, "already_ready": True}
+    progress("正在初始化在线模式与探针端口…")
+    return set_online_session(progress, restore_offline=False, no_launch=False)
+
+
 def discover_model_checkpoints() -> tuple[Path, ...]:
     checkpoint_root = REPOSITORY_ROOT / "checkpoints"
     if not checkpoint_root.is_dir():
@@ -682,11 +830,60 @@ def write_saved_decks(path: Path, decks: Mapping[str, SavedDeck]) -> None:
 
 MATCH_PRESETS = (
     MatchPreset(
-        "P.E.K.K.A Bridge Spam (Evo Ram/Ghost + Hero Magic Archer)",
-        PEKKA_BRIDGE_SPAM_DECK,
-        PEKKA_BRIDGE_SPAM_DECK,
-        PEKKA_BRIDGE_SPAM_FORMS,
-        PEKKA_BRIDGE_SPAM_FORMS,
+        "经典对决：皮卡攻城槌 VS 2.6 经典速猪",
+        BUILTIN_DECKS[1].deck,
+        BUILTIN_DECKS[0].deck,
+        BUILTIN_DECKS[1].forms,
+        BUILTIN_DECKS[0].forms,
+    ),
+    MatchPreset(
+        "推进博弈：皇家巨人速转 VS 经典龙骑毒墓",
+        BUILTIN_DECKS[2].deck,
+        BUILTIN_DECKS[4].deck,
+        BUILTIN_DECKS[2].forms,
+        BUILTIN_DECKS[4].forms,
+    ),
+    MatchPreset(
+        "消耗激战：超骑攻城炸弹人 VS 钻头迫击炮",
+        BUILTIN_DECKS[5].deck,
+        BUILTIN_DECKS[3].deck,
+        BUILTIN_DECKS[5].forms,
+        BUILTIN_DECKS[3].forms,
+    ),
+    MatchPreset(
+        "分路推进：皇家卫队双猪 VS 雷电巨人牢笼",
+        BUILTIN_DECKS[7].deck,
+        BUILTIN_DECKS[6].deck,
+        BUILTIN_DECKS[7].forms,
+        BUILTIN_DECKS[6].forms,
+    ),
+    MatchPreset(
+        "诱敌自闭：经典自闭飞桶 VS 2.6 经典速猪",
+        BUILTIN_DECKS[8].deck,
+        BUILTIN_DECKS[0].deck,
+        BUILTIN_DECKS[8].forms,
+        BUILTIN_DECKS[0].forms,
+    ),
+    MatchPreset(
+        "极速突袭：狂暴精锐突袭 VS 皮卡攻城槌",
+        BUILTIN_DECKS[9].deck,
+        BUILTIN_DECKS[1].deck,
+        BUILTIN_DECKS[9].forms,
+        BUILTIN_DECKS[1].forms,
+    ),
+    MatchPreset(
+        "速猪内战：2.6 经典速猪内战",
+        BUILTIN_DECKS[0].deck,
+        BUILTIN_DECKS[0].deck,
+        BUILTIN_DECKS[0].forms,
+        BUILTIN_DECKS[0].forms,
+    ),
+    MatchPreset(
+        "皮卡内战：皮卡攻城槌内战",
+        BUILTIN_DECKS[1].deck,
+        BUILTIN_DECKS[1].deck,
+        BUILTIN_DECKS[1].forms,
+        BUILTIN_DECKS[1].forms,
     ),
     MatchPreset(
         "骑士速弩内战（精英骑士 + 觉醒弓箭手/电塔）",
@@ -695,7 +892,6 @@ MATCH_PRESETS = (
         SPEED_XBOW_FORMS,
         SPEED_XBOW_FORMS,
     ),
-    MatchPreset("基础速弩内战（全部基础形态）", SPEED_XBOW_DECK, SPEED_XBOW_DECK, (0,) * 8, (0,) * 8),
 )
 
 
@@ -780,8 +976,21 @@ class DeckEditor:
         self.by_display = {item.display: item for item in self.options}
         self.by_id = {item.card_id: item for item in self.options}
         self.frame = ttk.LabelFrame(parent, text=title, padding=10)
+
+        preset_row = ttk.Frame(self.frame)
+        preset_row.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        ttk.Label(preset_row, text="内置卡组").pack(side="left", padx=(0, 6))
+        self.preset_deck_var = tk.StringVar(value="")
+        self.preset_deck_box = ttk.Combobox(
+            preset_row, textvariable=self.preset_deck_var, state="readonly", width=24,
+            values=tuple(preset.name for preset in BUILTIN_DECKS),
+        )
+        self.preset_deck_box.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.preset_deck_box.bind("<<ComboboxSelected>>", lambda _event: self._apply_builtin_preset())
+        ttk.Button(preset_row, text="应用", command=self._apply_builtin_preset).pack(side="left", padx=(0, 4))
+
         saved = ttk.Frame(self.frame)
-        saved.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        saved.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         ttk.Label(saved, text="自定义牌组").pack(side="left", padx=(0, 6))
         self.saved_deck_var = tk.StringVar()
         self.saved_deck_box = ttk.Combobox(saved, textvariable=self.saved_deck_var, state="readonly", width=17)
@@ -789,7 +998,7 @@ class DeckEditor:
         for label, command in (("载入", on_load), ("保存", on_save), ("删除", on_delete)):
             ttk.Button(saved, text=label, command=lambda action=command: action(self)).pack(side="left", padx=(0, 4))
         tower = ttk.Frame(self.frame)
-        tower.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        tower.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         ttk.Label(tower, text="塔楼兵种").pack(side="left", padx=(0, 8))
         self.tower_troop_var = tk.StringVar(value=TOWER_TROOP_OPTIONS[0][0])
         ttk.Combobox(
@@ -799,7 +1008,7 @@ class DeckEditor:
         ).pack(side="left", fill="x", expand=True)
         for column, label in enumerate(("槽位", "卡牌", "形态")):
             ttk.Label(self.frame, text=label, style="Muted.TLabel").grid(
-                row=2, column=column, padx=(0, 8 if column < 2 else 0), sticky="w"
+                row=3, column=column, padx=(0, 8 if column < 2 else 0), sticky="w"
             )
         self.card_vars: list[Any] = []
         self.card_boxes: list[Any] = []
@@ -808,7 +1017,7 @@ class DeckEditor:
         self.form_boxes: list[Any] = []
         values = tuple(item.display for item in self.options)
         for slot in range(8):
-            ttk.Label(self.frame, text=str(slot + 1)).grid(row=slot + 3, column=0, padx=(0, 8), pady=3, sticky="e")
+            ttk.Label(self.frame, text=str(slot + 1)).grid(row=slot + 4, column=0, padx=(0, 8), pady=3, sticky="e")
             for column, choices, width, variables in (
                 (1, values, 31, self.card_vars),
                 (2, (FORM_BASE,), 14, self.form_vars),
@@ -818,7 +1027,7 @@ class DeckEditor:
                     self.frame, textvariable=variable, values=choices,
                     state="normal" if column == 1 else "readonly", width=width,
                 )
-                box.grid(row=slot + 3, column=column, padx=(0, 8 if column == 1 else 0), pady=3, sticky="ew")
+                box.grid(row=slot + 4, column=column, padx=(0, 8 if column == 1 else 0), pady=3, sticky="ew")
                 variables.append(variable)
                 if column == 1:
                     self.card_boxes.append(box)
@@ -832,6 +1041,12 @@ class DeckEditor:
                 else:
                     self.form_boxes.append(box)
         self.frame.columnconfigure(1, weight=1)
+
+    def _apply_builtin_preset(self) -> None:
+        name = self.preset_deck_var.get()
+        preset = BUILTIN_DECK_BY_NAME.get(name)
+        if preset is not None:
+            self.set_deck(preset.deck, preset.forms, preset.tower_troop_id)
 
     def _filter_card(self, index: int) -> None:
         query = self.card_vars[index].get().strip().casefold()
@@ -879,6 +1094,15 @@ class DeckEditor:
             self.form_vars[index].set(form)
         if tower_troop_id is not None:
             self.tower_troop_var.set(TOWER_TROOP_BY_ID[tower_troop_id])
+        deck_tuple = tuple(int(c) for c in deck)
+        matched = False
+        for p in BUILTIN_DECKS:
+            if p.deck == deck_tuple:
+                self.preset_deck_var.set(p.name)
+                matched = True
+                break
+        if not matched:
+            self.preset_deck_var.set("")
 
     def tower_troop_id(self) -> int:
         try:
@@ -926,6 +1150,8 @@ class CRHarnessInterface:
         self.native: Any | None = None
         self.overlay_process: subprocess.Popen[Any] | None = None
         self.overlay_log: Any | None = None
+        default_enable_overlay = setting("CR_ENABLE_OVERLAY", "0").lower() in ("1", "true", "yes")
+        self.enable_overlay_var = tk.BooleanVar(value=default_enable_overlay)
         self.replay_native: Any | None = None
         self.replay_stop_event = threading.Event()
         self.replay_pause_event = threading.Event()
@@ -942,6 +1168,12 @@ class CRHarnessInterface:
         self.model_process: subprocess.Popen[Any] | None = None
         self.model_log: Any | None = None
         self.model_artifact_dir: Path | None = None
+        self.live_process: subprocess.Popen[Any] | None = None
+        self.live_log: Any | None = None
+        self.live_artifact_dir: Path | None = None
+        self.live_stop_requested = threading.Event()
+        self.live_active = False
+        self.live_mode_online = False
 
         root.title("FirstLight CR 控制台")
         if os.name == "nt":
@@ -982,17 +1214,20 @@ class CRHarnessInterface:
         self.match_tab = ttk.Frame(notebook, padding=12)
         self.replay_tab = ttk.Frame(notebook, padding=12)
         self.collected_replay_tab = ttk.Frame(notebook, padding=12)
+        self.live_tab = ttk.Frame(notebook, padding=12)
         notebook.add(self.model_tab, text="1  Human VS AI")
         notebook.add(self.duel_tab, text="2  AI VS AI")
         notebook.add(self.match_tab, text="3  手动 native 对局")
         notebook.add(self.replay_tab, text="4  训练回放")
         notebook.add(self.collected_replay_tab, text="5  采集回放")
+        notebook.add(self.live_tab, text="6  在线实战 (Live)")
         self._build_model_tab()
         self._build_duel_tab()
         self._build_match_tab()
         self._refresh_saved_deck_choices()
         self._build_replay_tab()
         self._build_collected_replay_tab()
+        self._build_live_tab()
         self._build_footer()
         if self.saved_decks_error is not None:
             self._show_error(self.saved_decks_error)
@@ -1081,6 +1316,16 @@ class CRHarnessInterface:
                 (None, "选择文件…", self.choose_model_checkpoint, ""),
             ),
         )
+        preset_row = self._row(self.model_tab, "对战卡组模板")
+        ttk.Label(preset_row, text="双方卡组模板：").pack(side="left")
+        self.model_preset_var = tk.StringVar(value=MATCH_PRESETS[0].name)
+        self.model_preset_box = ttk.Combobox(
+            preset_row, textvariable=self.model_preset_var, values=tuple(p.name for p in MATCH_PRESETS),
+            state="readonly", width=36,
+        )
+        self.model_preset_box.pack(side="left", padx=8)
+        ttk.Button(preset_row, text="套用模板", command=self.apply_model_preset).pack(side="left", padx=4)
+
         decks = ttk.Frame(self.model_tab)
         decks.pack(fill="both", expand=True, pady=(10, 8))
         preset = MATCH_PRESETS[0]
@@ -1104,13 +1349,33 @@ class CRHarnessInterface:
                 (None, "Reset 离线 VM 进程", self.reset_vm3, "right"),
             ),
         )
+        ttk.Checkbutton(actions, text="启用外部透明浮层 (Overlay)", variable=self.enable_overlay_var).pack(side="right", padx=10)
         self._status(
             self.model_tab, "model_status", "选择模型与双方牌组，然后开始离线对局。", fill="x", pady=(8, 0), align="w"
         )
         self.refresh_model_checkpoints()
 
     def _build_duel_tab(self) -> None:
+        import tkinter as tk
         from tkinter import ttk
+
+        mode_row = self._row(self.duel_tab, "对战玩法与预设")
+        ttk.Label(mode_row, text="玩法模式：").pack(side="left")
+        self.duel_mode_box = self._input(
+            mode_row, "duel_game_mode", values=tuple(name for name, _ in DUEL_GAME_MODES), width=28
+        )
+        self.duel_mode_box.pack(side="left", padx=8)
+        self.duel_game_mode_var.set(DUEL_GAME_MODES[0][0])
+
+        ttk.Label(mode_row, text="双方卡组模板：").pack(side="left", padx=(10, 0))
+        self.duel_preset_var = tk.StringVar(value=MATCH_PRESETS[0].name)
+        self.duel_preset_box = ttk.Combobox(
+            mode_row, textvariable=self.duel_preset_var, values=tuple(p.name for p in MATCH_PRESETS),
+            state="readonly", width=30,
+        )
+        self.duel_preset_box.pack(side="left", padx=8)
+        ttk.Button(mode_row, text="套用模板", command=self.apply_duel_preset).pack(side="left", padx=4)
+        ttk.Button(mode_row, text="🎲 随机全觉醒卡组", command=self.randomize_duel_evolution_decks).pack(side="left", padx=4)
 
         checkpoints = self._row(self.duel_tab, "双方模型")
         for owner, label in enumerate(("上方 AI Checkpoint", "下方 AI Checkpoint")):
@@ -1145,6 +1410,46 @@ class CRHarnessInterface:
         self._status(self.duel_tab, "duel_status", "选择双方模型和卡组，然后开始对局。", fill="x", pady=(8, 0), align="w")
         self.refresh_duel_checkpoints()
 
+    def apply_model_preset(self) -> None:
+        name = self.model_preset_var.get()
+        for preset in MATCH_PRESETS:
+            if preset.name == name:
+                self.model_deck0_editor.set_deck(preset.deck0, preset.forms0)
+                self.model_deck1_editor.set_deck(preset.deck1, preset.forms1)
+                self._append_log(f"已为模型对局双方套用模板：{preset.name}")
+                break
+
+    def apply_duel_preset(self) -> None:
+        name = self.duel_preset_var.get()
+        for preset in MATCH_PRESETS:
+            if preset.name == name:
+                self.duel_deck0_editor.set_deck(preset.deck0, preset.forms0)
+                self.duel_deck1_editor.set_deck(preset.deck1, preset.forms1)
+                self._append_log(f"已为 AI 对局双方套用模板：{preset.name}")
+                break
+
+    def apply_match_preset(self) -> None:
+        name = self.match_preset_var.get()
+        for preset in MATCH_PRESETS:
+            if preset.name == name:
+                self.deck0_editor.set_deck(preset.deck0, preset.forms0)
+                self.deck1_editor.set_deck(preset.deck1, preset.forms1)
+                self._append_log(f"已为手动对局双方套用模板：{preset.name}")
+                break
+
+    def randomize_duel_evolution_decks(self) -> None:
+        card_options = getattr(self, "card_options", None)
+        if not card_options:
+            card_options = load_card_options()
+        evo_options = [opt.card_id for opt in card_options if opt.supports_evolution]
+        if len(evo_options) < 8:
+            return
+        deck0 = tuple(secrets.SystemRandom().sample(evo_options, 8))
+        deck1 = tuple(secrets.SystemRandom().sample(evo_options, 8))
+        self.duel_deck0_editor.set_deck(deck0, (1,) * 8)
+        self.duel_deck1_editor.set_deck(deck1, (1,) * 8)
+        self._append_log("已为上方与下方 AI 各自随机抽取 8 张全觉醒卡牌组。")
+
     def refresh_duel_checkpoints(self) -> None:
         values = tuple(str(path) for path in discover_model_checkpoints())
         for owner in (0, 1):
@@ -1169,7 +1474,18 @@ class CRHarnessInterface:
             getattr(self, f"duel_checkpoint{owner}_var").set(value)
 
     def _build_match_tab(self) -> None:
+        import tkinter as tk
         from tkinter import ttk
+
+        match_preset_row = self._row(self.match_tab, "对战卡组模板")
+        ttk.Label(match_preset_row, text="双方卡组模板：").pack(side="left")
+        self.match_preset_var = tk.StringVar(value=MATCH_PRESETS[0].name)
+        self.match_preset_box = ttk.Combobox(
+            match_preset_row, textvariable=self.match_preset_var, values=tuple(p.name for p in MATCH_PRESETS),
+            state="readonly", width=36,
+        )
+        self.match_preset_box.pack(side="left", padx=8)
+        ttk.Button(match_preset_row, text="套用模板", command=self.apply_match_preset).pack(side="left", padx=4)
 
         decks = ttk.Frame(self.match_tab)
         decks.pack(fill="both", expand=True, pady=(12, 8))
@@ -1185,10 +1501,11 @@ class CRHarnessInterface:
         self._buttons(
             actions,
             (
-                ("start_match_button", "启动 native 对局并打开鼠标覆盖层", self.start_match, "primary"),
+                ("start_match_button", "启动 native 对局", self.start_match, "primary"),
                 (None, "Reset VM3 进程", self.reset_vm3, ""),
             ),
         )
+        ttk.Checkbutton(actions, text="启用外部透明浮层 (Overlay)", variable=self.enable_overlay_var).pack(side="right", padx=10)
         preset = MATCH_PRESETS[0]
         self.deck0_editor.set_deck(preset.deck0, preset.forms0)
         self.deck1_editor.set_deck(preset.deck1, preset.forms1)
@@ -1303,6 +1620,623 @@ class CRHarnessInterface:
         self._build_replay_controls(self.collected_replay_tab, collected=True)
         self.refresh_collected_replays()
 
+    def _build_live_tab(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        # 1. 在线模式与探针状态
+        env_box = self._row(self.live_tab, "在线模式与探针状态")
+        self._buttons(
+            env_box,
+            (
+                ("enable_online_button", "开启在线网络模式", self.enable_online_mode, "primary"),
+                ("restore_offline_button", "恢复离线隔离", self.restore_offline_mode, ""),
+                ("check_touch_api_button", "检测原生触控状态", self.check_live_touch_api, ""),
+            ),
+        )
+        self._status(
+            self.live_tab,
+            "live_env_status",
+            "在线模式状态：点击【开启在线网络模式】以解除 VM 隔离并转发探针端口。",
+            fill="x",
+            pady=(4, 8),
+            align="w",
+        )
+
+        # 2. 在线 AI 自动对战 (Live Agent)
+        ai_box = self._row(self.live_tab, "在线 AI 自动对战 (Live Agent)")
+        cp_row = self._row(ai_box, pady=(0, 4))
+        ttk.Label(cp_row, text="AI 模型 Checkpoint").pack(side="left")
+        self.live_checkpoint_box = self._input(cp_row, "live_checkpoint", values=(), width=60)
+        self.live_checkpoint_box.pack(side="left", fill="x", expand=True, padx=8)
+        self._buttons(
+            cp_row,
+            (
+                (None, "选择文件…", self.choose_live_checkpoint, ""),
+                (None, "刷新", self.refresh_live_checkpoints, ""),
+            ),
+        )
+        self.live_checkpoint_hint_var = tk.StringVar(value="")
+        ttk.Label(
+            ai_box,
+            textvariable=self.live_checkpoint_hint_var,
+            style="Muted.TLabel",
+            wraplength=760,
+            justify="left",
+        ).pack(fill="x", padx=4, pady=(0, 6))
+        self.live_checkpoint_var.trace_add("write", lambda *_: self._update_live_checkpoint_hint())
+
+        cfg_row = self._row(ai_box, pady=(0, 6))
+        ttk.Label(cfg_row, text="AI 控制角色:").pack(side="left")
+        self.live_actor_owner_box = self._input(
+            cfg_row,
+            "live_actor_owner",
+            values=("自动识别角色 (推荐)", "玩家 1 (对局角色 1)", "玩家 0 (对局角色 0)"),
+            value="自动识别角色 (推荐)",
+            width=22,
+        )
+        self.live_actor_owner_box.pack(side="left", padx=(4, 16))
+
+        ttk.Label(cfg_row, text="推理设备:").pack(side="left")
+        has_cuda = False
+        try:
+            import torch
+            has_cuda = torch.cuda.is_available()
+        except Exception:
+            pass
+        default_device = "cuda" if has_cuda else "cpu"
+        self.live_device_box = self._input(
+            cfg_row,
+            "live_device",
+            values=("cuda", "cpu"),
+            value=default_device,
+            width=10,
+        )
+        self.live_device_box.pack(side="left", padx=(4, 16))
+
+        self.live_sample_var = tk.BooleanVar(value=False)
+        self.live_sample_check = ttk.Checkbutton(
+            cfg_row, text="随机采样策略 (默认确定性 argmax)", variable=self.live_sample_var
+        )
+        self.live_sample_check.pack(side="left", padx=8)
+
+        ai_actions = self._row(ai_box, pady=(4, 0))
+        self._buttons(
+            ai_actions,
+            (
+                ("start_live_button", "一键启动在线 AI 对战", self.start_live_agent, "primary"),
+                ("force_live_button", "⚡ 立即强制下牌", self.force_live_deploy, "warning"),
+                ("stop_live_button", "停止在线 AI", self.stop_live_agent, "stop"),
+            ),
+        )
+        self.force_live_button.configure(state="disabled")
+        self._status(
+            self.live_tab,
+            "live_status",
+            "就绪：点击【一键启动在线 AI 对战】后，在模拟器内开启真实天梯或友谊战，AI 会自动接入并执行触控下兵。",
+            fill="x",
+            pady=(4, 8),
+            align="w",
+        )
+
+        # 3. 原生触摸合成快速测试
+        touch_box = self._row(self.live_tab, "原生触摸合成快速测试")
+        t_row1 = self._row(touch_box, pady=(0, 6))
+        ttk.Label(t_row1, text="手牌单点:").pack(side="left", padx=(0, 6))
+        self._buttons(
+            t_row1,
+            (
+                (None, "手牌 1 (224,1120)", lambda: self.quick_tap_hand(0), ""),
+                (None, "手牌 2 (360,1120)", lambda: self.quick_tap_hand(1), ""),
+                (None, "手牌 3 (494,1120)", lambda: self.quick_tap_hand(2), ""),
+                (None, "手牌 4 (630,1120)", lambda: self.quick_tap_hand(3), ""),
+                (None, "⚡ 测试英雄技能", self.quick_test_ability, ""),
+                (None, "下兵手势测试 (槽位0 -> 战场)", self.quick_test_deploy, "primary"),
+            ),
+        )
+
+        t_row2 = self._row(touch_box, pady=(0, 2))
+        ttk.Label(t_row2, text="自定义坐标点击:").pack(side="left", padx=(0, 4))
+        ttk.Label(t_row2, text="X:").pack(side="left")
+        self.touch_custom_x_var = tk.StringVar(value="360")
+        ttk.Entry(t_row2, textvariable=self.touch_custom_x_var, width=8).pack(side="left", padx=(2, 8))
+        ttk.Label(t_row2, text="Y:").pack(side="left")
+        self.touch_custom_y_var = tk.StringVar(value="640")
+        ttk.Entry(t_row2, textvariable=self.touch_custom_y_var, width=8).pack(side="left", padx=(2, 8))
+        self._buttons(
+            t_row2,
+            (
+                (None, "执行点击", self.quick_custom_tap, ""),
+            ),
+        )
+        self._status(
+            self.live_tab,
+            "live_touch_status",
+            "触摸测试状态：就绪",
+            fill="x",
+            pady=(4, 8),
+            align="w",
+        )
+
+        # 4. 实时战况监控输出
+        live_mon_box = self._row(self.live_tab, "在线实战动态监控")
+        self.live_monitor_text = tk.Text(
+            live_mon_box,
+            height=6,
+            wrap="word",
+            font=("Consolas", 9),
+            background="#ffffff",
+            foreground="#1e293b",
+            relief="solid",
+            borderwidth=1,
+            state="disabled",
+        )
+        self.live_monitor_text.pack(fill="both", expand=True, pady=4)
+        self.refresh_live_checkpoints()
+
+    def _append_live_monitor(self, message: str) -> None:
+        if not hasattr(self, "live_monitor_text"):
+            return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.live_monitor_text.configure(state="normal")
+        self.live_monitor_text.insert("end", f"[{timestamp}] {message}\n")
+        self.live_monitor_text.see("end")
+        self.live_monitor_text.configure(state="disabled")
+
+    def _update_live_checkpoint_hint(self) -> None:
+        cp_str = (self.live_checkpoint_var.get() or "").lower()
+        if not cp_str:
+            self.live_checkpoint_hint_var.set("")
+            return
+        if "hog26" in cp_str or "specialist" in cp_str:
+            self.live_checkpoint_hint_var.set(
+                "⚠️ 专精提示：当前选择为【2.6 速猪专属模型】。该模型严格针对标准 2.6 速猪卡组训练。"
+                "若在实战中使用非 2.6 卡牌（如女武神、刽子手、皇家速递等），策略会严重混乱或停滞！"
+                "如果使用其他卡组，强烈建议切换为 General/checkpoint-step-00000460.pt 通用模型。"
+            )
+        elif "general" in cp_str:
+            self.live_checkpoint_hint_var.set(
+                "💡 通用模型提示：当前选择为【通用全卡组基础模型】(推荐)。已对全量卡牌泛化训练，适合自定义卡组及各类常见卡牌实战。"
+            )
+        elif "il" in cp_str:
+            self.live_checkpoint_hint_var.set(
+                "💡 模仿学习模型：通过人类对局轨迹训练，适合常见对局实战。"
+            )
+        else:
+            self.live_checkpoint_hint_var.set("已选择自定义检查点。请确保实战卡组与模型训练目标一致。")
+
+    def refresh_live_checkpoints(self) -> None:
+        raw_checkpoints = discover_model_checkpoints()
+
+        def _sort_key(p: Path) -> tuple[int, int]:
+            p_str = str(p).lower()
+            prio = 0 if "general" in p_str else (1 if "il" in p_str else 2)
+            return (prio, -p.stat().st_mtime_ns)
+
+        sorted_checkpoints = sorted(raw_checkpoints, key=_sort_key)
+        values = tuple(str(path) for path in sorted_checkpoints)
+        self.live_checkpoint_box.configure(values=values)
+        if values and not self.live_checkpoint_var.get():
+            self.live_checkpoint_var.set(values[0])
+        self._update_live_checkpoint_hint()
+
+    def choose_live_checkpoint(self) -> None:
+        from tkinter import filedialog
+
+        initial = REPOSITORY_ROOT / "runs"
+        selected = filedialog.askopenfilename(
+            parent=self.root,
+            title="选择 V4 检查点",
+            initialdir=str(initial if initial.is_dir() else REPOSITORY_ROOT),
+            filetypes=[("PyTorch 模型", "*.pt"), ("所有文件", "*.*")],
+        )
+        if selected:
+            self.live_checkpoint_var.set(selected)
+
+    def enable_online_mode(self) -> None:
+        self.live_env_status_var.set("正在切换至在线网络模式…")
+        self._append_log("开启在线网络模式：解除 iptables 隔离并转发探针端口…")
+
+        def run():
+            return set_online_session(self._progress, restore_offline=False)
+
+        def done(result):
+            pid = result.get("pid", "")
+            port = result.get("controlPort", CONTROL_PORT)
+            self.live_mode_online = True
+            msg = f"在线网络模式已就绪 · 端口 {port} 已映射 · 游戏 PID: {pid or '未检测到'}"
+            self.live_env_status_var.set(msg)
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+
+        def failed(error):
+            self.live_env_status_var.set(f"开启在线模式失败：{error}")
+            self._show_error(error)
+
+        self._background("enable-online", run, done, failed)
+
+    def restore_offline_mode(self) -> None:
+        self.live_env_status_var.set("正在恢复离线网络隔离…")
+        self._append_log("恢复离线网络隔离…")
+
+        def run():
+            return set_online_session(self._progress, restore_offline=True, no_launch=True)
+
+        def done(result):
+            self.live_mode_online = False
+            msg = "离线网络隔离已生效 · 客户端无法访问外部互联网"
+            self.live_env_status_var.set(msg)
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+
+        def failed(error):
+            self.live_env_status_var.set(f"恢复离线隔离失败：{error}")
+            self._show_error(error)
+
+        self._background("restore-offline", run, done, failed)
+
+    def check_live_touch_api(self) -> None:
+        self.live_env_status_var.set("正在检测原生触控钩子状态…")
+
+        def run():
+            touch_info = _probe_native("live-touch-api")
+            status_info = _probe_native("live-status")
+            return touch_info, status_info
+
+        def done(result):
+            touch_info, status_info = result
+            if touch_info and touch_info.get("ok"):
+                w = touch_info.get("width", 720)
+                h = touch_info.get("height", 1280)
+                installed = touch_info.get("installed", False)
+                mode = touch_info.get("mode", "")
+                msg = f"✅ 原生触控正常：{mode} (已安装={installed}) · 屏幕分辨率 {w}x{h}"
+            else:
+                msg = "❌ 探针未响应或触控不可用（请确认模拟器已开启并在在线模式下）"
+            self.live_env_status_var.set(msg)
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+
+        def failed(error):
+            self.live_env_status_var.set(f"检测失败：{error}")
+            self._show_error(error)
+
+        self._background("check-touch", run, done, failed)
+
+    def quick_tap_hand(self, slot: int) -> None:
+        self.live_touch_status_var.set(f"正在点击手牌槽位 {slot + 1}…")
+
+        def run():
+            layout_reply = _probe_native("live-touch-layout")
+            w, h = 720, 1280
+            if layout_reply and layout_reply.get("ok"):
+                w = layout_reply.get("width", 720)
+                h = layout_reply.get("height", 1280)
+            if w == 1080 and h == 1920:
+                coords = [(336, 1680), (540, 1680), (741, 1680), (945, 1680)]
+            else:
+                coords = [(224, 1120), (360, 1120), (494, 1120), (630, 1120)]
+            if not (0 <= slot < len(coords)):
+                return None
+            x, y = coords[slot]
+            return _probe_native(f"live-tap {x} {y}"), x, y
+
+        def done(result):
+            if not result:
+                return
+            reply, x, y = result
+            if reply and reply.get("ok"):
+                msg = f"✅ 点击成功：手牌 {slot + 1} ({x}, {y})"
+            else:
+                msg = f"❌ 点击失败：{reply}"
+            self.live_touch_status_var.set(msg)
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+
+        def failed(error):
+            self.live_touch_status_var.set(f"手牌点击出错：{error}")
+            self._show_error(error)
+
+        self._background("quick-tap-hand", run, done, failed)
+
+    def quick_custom_tap(self) -> None:
+        try:
+            x = int(self.touch_custom_x_var.get().strip())
+            y = int(self.touch_custom_y_var.get().strip())
+        except ValueError:
+            self.live_touch_status_var.set("请输入有效的整数坐标 X 和 Y")
+            return
+        self._quick_tap(x, y, desc="自定义坐标")
+
+    def _quick_tap(self, x: int, y: int, *, desc: str) -> None:
+        self.live_touch_status_var.set(f"正在向 ({x}, {y}) 发送单点点击…")
+
+        def run():
+            return _probe_native(f"live-tap {x} {y}")
+
+        def done(reply):
+            if reply and reply.get("ok"):
+                msg = f"✅ 点击成功：{desc} ({x}, {y})"
+            else:
+                msg = f"❌ 点击失败：{reply}"
+            self.live_touch_status_var.set(msg)
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+
+        def failed(error):
+            self.live_touch_status_var.set(f"点击出错：{error}")
+            self._show_error(error)
+
+        self._background("quick-tap", run, done, failed)
+
+    def quick_test_ability(self) -> None:
+        self.live_touch_status_var.set("正在点击英雄技能按钮…")
+
+        def run():
+            return _probe_native("live-tap-ability")
+
+        def done(reply):
+            if reply and reply.get("ok"):
+                x = reply.get("x", 649)
+                y = reply.get("y", 967)
+                msg = f"✅ 技能点击成功：英雄技能按钮 ({x}, {y})"
+            else:
+                msg = f"❌ 技能点击失败：{reply}"
+            self.live_touch_status_var.set(msg)
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+
+        def failed(error):
+            self.live_touch_status_var.set(f"技能点击出错：{error}")
+            self._show_error(error)
+
+        self._background("quick-tap-ability", run, done, failed)
+
+    def quick_test_deploy(self) -> None:
+        self.live_touch_status_var.set("正在执行下兵手势：槽位 0 -> 战场中路 (0, 10000)…")
+
+        def run():
+            return _probe_native("live-touch-deploy 0 0 10000")
+
+        def done(reply):
+            if reply and reply.get("ok"):
+                card = reply.get("cardPixel", [])
+                arena = reply.get("arenaPixel", [])
+                msg = f"✅ 下兵手势成功：卡槽 {card} -> 场地 {arena}"
+            else:
+                msg = f"❌ 下兵手势失败：{reply}"
+            self.live_touch_status_var.set(msg)
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+
+        def failed(error):
+            self.live_touch_status_var.set(f"手势出错：{error}")
+            self._show_error(error)
+
+        self._background("test-deploy", run, done, failed)
+
+    def start_live_agent(self) -> None:
+        if self.busy or self.live_active:
+            return
+        try:
+            checkpoint = Path(self.live_checkpoint_var.get()).resolve()
+            if not checkpoint.is_file():
+                raise FileNotFoundError(f"Checkpoint 不存在：{checkpoint}")
+            owner_text = self.live_actor_owner_var.get()
+            actor_owner = (
+                0 if ("0" in owner_text and "自动" not in owner_text)
+                else (1 if ("1" in owner_text and "自动" not in owner_text) else "auto")
+            )
+            has_cuda = False
+            try:
+                import torch
+                has_cuda = torch.cuda.is_available()
+            except Exception:
+                pass
+            device = self.live_device_box.get().strip() or ("cuda" if has_cuda else "cpu")
+            sample = bool(self.live_sample_var.get())
+        except (ValueError, OSError) as error:
+            self._show_error(error)
+            return
+
+        if not self._confirm_replace_owned_session("在线实战 AI"):
+            return
+        self.stop_replay()
+        self._terminate_overlay()
+        self.live_active = True
+        self.live_stop_requested = threading.Event()
+        self._set_live_controls_active(True)
+        self.live_status_var.set("正在启动在线 AI 监听进程… 请在游戏中开启天梯或友谊战。")
+        self._append_log(f"启动在线 AI：checkpoint={checkpoint.name}, owner={actor_owner}, device={device}")
+        self._append_live_monitor(f"在线 AI 已启动 · 正在等待实时对局接入…")
+
+        artifact = REPOSITORY_ROOT / "runs" / "live" / f"agent-{time.time_ns()}"
+        artifact.mkdir(parents=True, exist_ok=True)
+        self.live_artifact_dir = artifact
+
+        def run():
+            # 自动确保在线模式与探针端口就绪
+            ensure_online_session(self._progress)
+            if self.live_stop_requested.is_set():
+                return None, 0
+
+            process, log = self._launch_python(
+                "native_runner.training.v4.live_agent",
+                artifact / "console.log",
+                checkpoint=checkpoint,
+                actor_owner=actor_owner,
+                host=CONTROL_HOST,
+                port=CONTROL_PORT,
+                device=device,
+                sample=sample,
+                artifact_dir=artifact,
+            )
+            self.live_process, self.live_log = process, log
+            decisions_path = artifact / "live_decisions.jsonl"
+            last_pos = 0
+
+            while process.poll() is None:
+                if self.live_stop_requested.is_set():
+                    (artifact / "stop").touch()
+                if decisions_path.is_file():
+                    with decisions_path.open("r", encoding="utf-8", errors="replace") as f:
+                        f.seek(last_pos)
+                        lines = f.readlines()
+                        last_pos = f.tell()
+                        for line in lines:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                event = json.loads(line)
+                            except Exception:
+                                continue
+                            self._post(self._on_live_event, event)
+                time.sleep(0.15)
+            # Drain any remaining lines
+            if decisions_path.is_file():
+                with decisions_path.open("r", encoding="utf-8", errors="replace") as f:
+                    f.seek(last_pos)
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                self._post(self._on_live_event, json.loads(line))
+                            except Exception:
+                                pass
+            return process, process.returncode
+
+        def failed(error):
+            self._set_live_controls_active(False)
+            self.live_active = False
+            self.live_status_var.set(f"在线 AI 运行失败：{error}")
+            self._show_error(error)
+
+        self._background("live-agent", run, lambda result: self._live_agent_finished(*result), failed)
+
+    def _on_live_event(self, event: dict[str, Any]) -> None:
+        ev_type = event.get("event")
+        if ev_type == "attached":
+            tick = event.get("tick", 0)
+            msg = f"🟢 已接入在线对局 (tick={tick}) · AI 正在实时决策并自动触控下牌"
+            self.live_status_var.set(msg)
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+            if "deckWarning" in event:
+                w_msg = f"⚠️ {event['deckWarning']}"
+                self._append_log(w_msg)
+                self._append_live_monitor(w_msg)
+        elif ev_type == "warmup-complete":
+            msg = f"⚡ {event.get('message', '模型预热完成')}"
+            self.live_status_var.set(msg)
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+        elif ev_type == "warning":
+            msg = f"⚠️ {event.get('message')}"
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+        elif ev_type == "role-resolved":
+            msg = f"🎯 {event.get('message')}"
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+        elif ev_type == "deck-broadcast":
+            msg = event.get("message")
+            if msg:
+                self._append_log(msg)
+                self._append_live_monitor(msg)
+        elif ev_type == "battle-finished":
+            battles = event.get("battles", 1)
+            msg = f"🏁 本场对局结束 (累计完成 {battles} 场) · 正在等待下一场对局…"
+            self.live_status_var.set(msg)
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+        elif ev_type == "auto-battle-triggered":
+            msg = f"⚔️ {event.get('message', '首页自动点击【开始对局】')}"
+            self.live_status_var.set(msg)
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+        elif ev_type in ("watchdog-recovering", "watchdog-recovered"):
+            msg = f"🩺 {event.get('message')}"
+            self.live_status_var.set(msg)
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+        elif ev_type == "early_threat_detected":
+            msg = event.get("message", "⚔️ 探测到对手开局桥头突袭，立即提前激活AI防御部署！")
+            self.live_status_var.set(msg)
+            self._append_log(msg)
+            self._append_live_monitor(msg)
+        elif "tick" in event:
+            tick = event.get("tick")
+            sub = event.get("submitted", 0)
+            rej = event.get("rejected", 0)
+            inf_ms = event.get("inference_ms", 0.0)
+            actions = event.get("actions", [])
+            manual_forced = event.get("manual_forced", False)
+            elixir = event.get("elixir")
+            act_desc = f"{len(actions)} 动作"
+            if actions:
+                a0 = actions[0]
+                if a0.get("kind") == "play_card":
+                    act_desc = f"手牌槽位 {a0.get('hand_slot')} -> 目标 {a0.get('target_grid')}"
+                else:
+                    act_desc = f"{a0.get('kind', 'wait')}"
+            tag = " [手动强制]" if manual_forced else ""
+            msg = f"决策 tick={tick} ({inf_ms:.1f}ms){tag} · 提交={sub}, 拒绝={rej} · {act_desc}"
+            self.live_status_var.set(f"对局进行中: {msg}")
+            if sub > 0:
+                self._append_live_monitor(f"🎮 触控下牌{tag}：{act_desc} (tick={tick})")
+
+    def _live_agent_finished(self, process, exit_code: int) -> None:
+        if getattr(self, "live_process", None) is not None and self.live_process is not process:
+            return
+        self.live_process = None
+        if getattr(self, "live_log", None) is not None:
+            self.live_log.close()
+            self.live_log = None
+        self._set_live_controls_active(False)
+        self.live_active = False
+
+        artifact_dir = getattr(self, "live_artifact_dir", None)
+        result_path = artifact_dir / "result.json" if artifact_dir else None
+        if exit_code == 0 and result_path and result_path.is_file():
+            try:
+                res = json.loads(result_path.read_text(encoding="utf-8"))
+                battles = res.get("battles", 0)
+                decisions = res.get("decisions", 0)
+                submitted = res.get("submitted", 0)
+                msg = f"在线 AI 已安全停止 · 完成 {battles} 场对局 · 决策 {decisions} 次 · 下牌 {submitted} 次"
+            except Exception:
+                msg = "在线 AI 已停止"
+        else:
+            log_path = artifact_dir / "console.log" if artifact_dir else "-"
+            msg = f"在线 AI 进程退出 (code={exit_code}) · 日志: {log_path}"
+        self.live_status_var.set(msg)
+        self._append_log(msg)
+        self._append_live_monitor(msg)
+
+    def force_live_deploy(self) -> None:
+        if not getattr(self, "live_active", False) or self.live_artifact_dir is None:
+            self._append_log("当前没有正在运行的在线 AI 对战")
+            return
+        (self.live_artifact_dir / "force_act").touch()
+        self._append_live_monitor("⚡ 用户触发【立即强制下牌】指令！AI 将在下一帧执行卡牌部署。")
+        self._append_log("⚡ 用户触发【立即强制下牌】指令")
+
+    def stop_live_agent(self) -> None:
+        self.live_stop_requested.set()
+        if self.live_artifact_dir is not None:
+            (self.live_artifact_dir / "stop").touch()
+        self.live_status_var.set("正在停止在线 AI…")
+        self._append_log("正在停止在线 AI 对战…")
+
+    def _set_live_controls_active(self, active: bool) -> None:
+        if hasattr(self, "start_live_button"):
+            self.start_live_button.configure(state="disabled" if active else "normal")
+        if hasattr(self, "force_live_button"):
+            self.force_live_button.configure(state="normal" if active else "disabled")
+        if hasattr(self, "stop_live_button"):
+            self.stop_live_button.configure(state="normal" if active else "disabled")
+
     def _build_footer(self) -> None:
         import tkinter as tk
 
@@ -1323,10 +2257,11 @@ class CRHarnessInterface:
     def _append_log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         LOGGER.info(message)
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"[{timestamp}] {message}\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
+        if hasattr(self, "log_text"):
+            self.log_text.configure(state="normal")
+            self.log_text.insert("end", f"[{timestamp}] {message}\n")
+            self.log_text.see("end")
+            self.log_text.configure(state="disabled")
 
     def _post(self, callback: Callable[..., Any], *args: Any) -> None:
         self.root.after(0, callback, *args)
@@ -1395,6 +2330,8 @@ class CRHarnessInterface:
         self.model_active = active
         self._set_busy(active)
         self.model_checkpoint_box.configure(state="disabled" if active else "readonly")
+        if hasattr(self, "duel_mode_box"):
+            self.duel_mode_box.configure(state="disabled" if active else "readonly")
         for owner in (0, 1):
             getattr(self, f"duel_checkpoint{owner}_box").configure(state="disabled" if active else "readonly")
             getattr(self, f"force_duel_{owner}_button").configure(state="disabled")
@@ -1422,15 +2359,62 @@ class CRHarnessInterface:
                     raise FileNotFoundError(checkpoint)
             deck0, forms0 = self.duel_deck0_editor.values()
             deck1, forms1 = self.duel_deck1_editor.values()
-            validate_model_deck_roles(forms0)
-            validate_model_deck_roles(forms1)
+            selected_mode_name = self.duel_game_mode_var.get() if hasattr(self, "duel_game_mode_var") else ""
+            game_mode_id = DUEL_GAME_MODE_BY_NAME.get(selected_mode_name, 72000006)
+            is_7x = (game_mode_id == 72000493 or "7倍圣水" in selected_mode_name)
+            is_all_evo = (game_mode_id == 72000491 or "全觉醒" in selected_mode_name)
+            if is_7x:
+                card_options = getattr(self, "card_options", None)
+                if not card_options:
+                    card_options = load_card_options()
+                evo_options = [opt.card_id for opt in card_options if opt.supports_evolution]
+                if len(evo_options) < 8:
+                    from .competitive_data import load_competitive_data
+                    supp_rows = load_competitive_data("card_support")["supported_cards"]
+                    evo_options = [int(r["card_id"]) for r in supp_rows if int(r.get("form_availability", 0)) & 1]
+                deck0 = tuple(secrets.SystemRandom().sample(evo_options, 8))
+                deck1 = tuple(secrets.SystemRandom().sample(evo_options, 8))
+                forms0 = (1,) * 8
+                forms1 = (1,) * 8
+                if hasattr(self.duel_deck0_editor, "set_deck"):
+                    try:
+                        self.duel_deck0_editor.set_deck(deck0, forms0)
+                    except Exception:
+                        pass
+                if hasattr(self.duel_deck1_editor, "set_deck"):
+                    try:
+                        self.duel_deck1_editor.set_deck(deck1, forms1)
+                    except Exception:
+                        pass
+                self._append_log("7倍圣水模式：已为双方随机分派 8 张觉醒卡牌组成全觉醒卡组，恢复标准 1v1 三塔。")
+            elif is_all_evo:
+                from .competitive_data import load_competitive_data
+                support_map = {
+                    int(r["card_id"]): int(r.get("form_availability", 0))
+                    for r in load_competitive_data("card_support")["supported_cards"]
+                }
+                forms0 = tuple((int(f) | 1) if (support_map.get(c, 0) & 1) else int(f) for c, f in zip(deck0, forms0))
+                forms1 = tuple((int(f) | 1) if (support_map.get(c, 0) & 1) else int(f) for c, f in zip(deck1, forms1))
+            else:
+                validate_model_deck_roles(forms0)
+                validate_model_deck_roles(forms1)
+            tower_troop0 = self.duel_deck0_editor.tower_troop_id()
+            tower_troop1 = self.duel_deck1_editor.tower_troop_id()
+            if is_7x:
+                if tower_troop0 == 159_000_004:
+                    tower_troop0 = 159_000_000
+                if tower_troop1 == 159_000_004:
+                    tower_troop1 = 159_000_000
             config = MatchConfig(
                 deck0=deck0, deck1=deck1,
                 deck0_form_availability=forms0, deck1_form_availability=forms1,
-                tower_troop0_id=self.duel_deck0_editor.tower_troop_id(),
-                tower_troop1_id=self.duel_deck1_editor.tower_troop_id(),
+                tower_troop0_id=tower_troop0,
+                tower_troop1_id=tower_troop1,
                 seed=_new_match_seed(), level_cap=11, minimum_card_level=11, king_tower_level=11,
                 owner0_name="AI-0", owner1_name="AI-1",
+                game_mode=game_mode_id,
+                arena=54000001,
+                location=15000199,
             )
         except (ValueError, OSError) as error:
             self._show_error(error)
@@ -1572,7 +2556,9 @@ class CRHarnessInterface:
             self.duel_status_var.set("双方 AI 正在对局。")
             return
         self._launch_overlay(owner=1 - owner)
-        self.model_status_var.set(f"模型控制{'上方' if owner == 0 else '下方'}；你控制另一方。")
+        self.model_status_var.set(
+            f"模型控制{'上方' if owner == 0 else '下方'}；请直接在模拟器中点击或拖拽手牌下兵。"
+        )
 
     def _model_finished(self, process, exit_code: int) -> None:
         if self.model_process is not process:
@@ -1730,9 +2716,12 @@ class CRHarnessInterface:
         )
 
     def _owned_pids(self) -> tuple[int, ...]:
+        pids: list[int] = []
         if self.overlay_process is not None and self.overlay_process.poll() is None:
-            return (self.overlay_process.pid,)
-        return ()
+            pids.append(self.overlay_process.pid)
+        if getattr(self, "live_process", None) is not None and self.live_process.poll() is None:
+            pids.append(self.live_process.pid)
+        return tuple(pids)
 
     def _check_operation_conflicts(self) -> bool:
         from tkinter import messagebox
@@ -1752,7 +2741,16 @@ class CRHarnessInterface:
     def _confirm_replace_owned_session(self, operation: str) -> bool:
         from tkinter import messagebox
 
-        if not self.owns_native_session:
+        if getattr(self, "live_active", False):
+            if not messagebox.askyesno(
+                "停止在线 AI 会话",
+                f"当前正在运行在线实战 AI。\n\n是否停止在线 AI 并开始{operation}？",
+                parent=self.root,
+            ):
+                return False
+            self.stop_live_agent()
+
+        if not getattr(self, "owns_native_session", False):
             return True
         return messagebox.askyesno(
             "替换当前 native 会话",
@@ -1768,6 +2766,8 @@ class CRHarnessInterface:
         self.start_match_button.configure(state=state)
         self.start_replay_button.configure(state=state)
         self.start_collected_replay_button.configure(state=state)
+        if hasattr(self, "start_live_button") and not getattr(self, "live_active", False):
+            self.start_live_button.configure(state=state)
 
     def _replay_controls(self, kind: str) -> tuple[Any, Any, Any]:
         if kind == "collected":
@@ -1864,8 +2864,10 @@ class CRHarnessInterface:
         log_handle = log_path.open("a", encoding="utf-8")
         command = [os.fspath(self._pythonw()), "-m", module]
         for name, value in options.items():
+            if value is False:
+                continue
             command.append("--" + name.replace("_", "-"))
-            if value is not None:
+            if value is not True and value is not None:
                 command.append(str(value))
         try:
             process = subprocess.Popen(
@@ -1882,6 +2884,8 @@ class CRHarnessInterface:
         return process, log_handle
 
     def _launch_overlay(self, *, owner: int | None = None) -> None:
+        if not self.enable_overlay_var.get():
+            return
         if self.overlay_process is None or self.overlay_process.poll() is not None:
             self.overlay_process, self.overlay_log = self._launch_python(
                 "native_runner.native_overlay",
@@ -1895,7 +2899,7 @@ class CRHarnessInterface:
     def _match_ready(self) -> None:
         self.owns_native_session = True
         self._set_busy(False)
-        self._append_log("对局已启动；请切到 MuMu，点击上方或下方手牌后再点击场地。")
+        self._append_log("对局已启动；请切到 MuMu，支持直接点击或拖拽手牌到场地部署。")
 
     def refresh_replay_runs(self) -> None:
         runs = discover_replay_runs()
@@ -2235,7 +3239,19 @@ class CRHarnessInterface:
             self.stop_model_match()
             self._background("stop-model", self._wait_model_stopped)
             return
+        if getattr(self, "live_active", False):
+            self.stop_live_agent()
+            self._wait_live_stopped()
         self._close_now()
+
+    def _wait_live_stopped(self) -> None:
+        process = getattr(self, "live_process", None)
+        if process is None:
+            return
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            process.terminate()
 
     def _close_now(self) -> None:
         self.stop_replay()

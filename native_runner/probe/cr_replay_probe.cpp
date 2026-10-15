@@ -1,6 +1,7 @@
 #define _GNU_SOURCE 1
 
 #include <android/log.h>
+#include <android/api-level.h>
 #include <arpa/inet.h>
 #include <cerrno>
 #include <dlfcn.h>
@@ -12,15 +13,18 @@
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <ucontext.h>
 #include <unistd.h>
 #include <zlib.h>
 
 #include <atomic>
+#include <thread>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
@@ -31,6 +35,7 @@
 #include <new>
 
 #include "native_touch_interceptor.h"
+#include "native_touch_layout.h"
 #include "probe_json.h"
 
 namespace {
@@ -92,6 +97,8 @@ constexpr std::uintptr_t kLogicCommandQueueDestroyOffset = 0x00d2ee40;
 // validation, command tick stamping and ClientInput network-message enqueue.
 // Calling it on the game thread preserves the stock outbound authority while
 // bypassing only GameApp::nOnTouchEvent and its multi-tick gesture state.
+constexpr std::uintptr_t kGetActiveBattleControllerOffset = 0x00c85c28;
+constexpr std::uintptr_t kFinishPlayerCommandOffset = 0x00c893d0;
 constexpr std::uintptr_t kStateSnapshotOffset = 0x00ad9a50;
 constexpr std::uintptr_t kStateSnapshotDeleteOffset = 0x0105e8bc;
 constexpr std::uintptr_t kByteStreamResetReadOffset = 0x0121220c;
@@ -210,6 +217,10 @@ using GameStateDeserializeBody = void (*)(void *, void *, std::int32_t, void *);
 using LogicDataByGlobalId = void *(*)(void *, std::int32_t);
 using LocationTileMapEnsure = void (*)(void *);
 using LocationTileMapLookup = void *(*)(void *);
+using GetActiveBattleController = void *(*)();
+using FinishPlayerCommand = void (*)(void *controller, void **command_ptr, std::int32_t flag);
+GetActiveBattleController g_get_active_battle_controller = nullptr;
+FinishPlayerCommand g_finish_player_command = nullptr;
 ReplayJsonSetter g_original_replay_json_setter = nullptr;
 ReplayManagerGetter g_replay_manager_getter = nullptr;
 LibgStringFromUtf8 g_libg_string_from_utf8 = nullptr;
@@ -803,6 +814,7 @@ bool inspect_content_runtime(void **root_out = nullptr, void **context_out = nul
 }
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, kLogTag, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, kLogTag, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, kLogTag, __VA_ARGS__)
 
 bool prewarm_location_tilemap(void *content_context, std::int32_t location_id) {
@@ -1330,6 +1342,136 @@ bool make_page_writable(void *address, int protection) {
   return mprotect(reinterpret_cast<void *>(page), static_cast<std::size_t>(page_size), protection) == 0;
 }
 
+
+jobject g_app_class_loader = nullptr;
+jmethodID g_class_loader_load_class = nullptr;
+
+constexpr std::uintptr_t kInitGooglePlayReviewOffset = 0x01406044;
+constexpr std::uint8_t kInitGooglePlayReviewPrologue[16] = {
+    0xff, 0x03, 0x03, 0xd1, 0xfd, 0x7b, 0x08, 0xa9,
+    0xf7, 0x4b, 0x00, 0xf9, 0xf6, 0x57, 0x0a, 0xa9,
+};
+void *g_original_init_google_play_review = nullptr;
+
+extern "C" void probe_hooked_init_google_play_review();
+
+constexpr std::uintptr_t kRequestGooglePlayReviewOffset = 0x0141c428;
+constexpr std::uint8_t kRequestGooglePlayReviewPrologue[16] = {
+    0xfd, 0x7b, 0xbd, 0xa9, 0xf5, 0x0b, 0x00, 0xf9,
+    0xf4, 0x4f, 0x02, 0xa9, 0xfd, 0x03, 0x00, 0x91,
+};
+void *g_original_request_google_play_review = nullptr;
+
+constexpr std::uintptr_t kRequestGooglePlayReviewInnerOffset = 0x0141c4ac;
+constexpr std::uint8_t kRequestGooglePlayReviewInnerPrologue[16] = {
+    0xff, 0x03, 0x03, 0xd1, 0xfd, 0x7b, 0x08, 0xa9,
+    0xf7, 0x4b, 0x00, 0xf9, 0xf6, 0x57, 0x0a, 0xa9,
+};
+void *g_original_request_google_play_review_inner = nullptr;
+
+constexpr std::uintptr_t kTaskAddOnCompleteListenerOffset = 0x013f6c98;
+constexpr std::uint8_t kTaskAddOnCompleteListenerPrologue[16] = {
+    0xff, 0x43, 0x01, 0xd1, 0xfd, 0x7b, 0x02, 0xa9,
+    0xf6, 0x57, 0x03, 0xa9, 0xf4, 0x4f, 0x04, 0xa9,
+};
+void *g_original_task_add_on_complete_listener = nullptr;
+
+extern "C" void probe_hooked_request_google_play_review();
+extern "C" void probe_hooked_task_add_on_complete_listener();
+
+constexpr std::uintptr_t kTitanFindClassOffset = 0x017d8be4;
+constexpr std::uint8_t kTitanFindClassPrologue[16] = {
+    0xff, 0xc3, 0x01, 0xd1, 0xfd, 0x7b, 0x01, 0xa9, 0xfb, 0x13, 0x00, 0xf9, 0xfa, 0x67, 0x03, 0xa9,
+};
+
+using TitanFindClass = jclass (*)(const char *);
+TitanFindClass g_original_titan_find_class = nullptr;
+
+jclass probe_hooked_titan_find_class(const char *name) {
+  if (name == nullptr) {
+    return nullptr;
+  }
+  if (std::strstr(name, "play/core/review") != nullptr ||
+      std::strstr(name, "google/android/play") != nullptr ||
+      std::strstr(name, "google/android/gms") != nullptr ||
+      std::strstr(name, "com/google/") != nullptr) {
+    if (g_java_vm != nullptr) {
+      JNIEnv *env = nullptr;
+      if (g_java_vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_OK && env != nullptr) {
+        if (env->ExceptionCheck()) {
+          env->ExceptionClear();
+        }
+      }
+    }
+    LOGI("probe_hooked_titan_find_class safely suppressed review lookup: %s", name);
+    return nullptr;
+  }
+  if (g_native_dialog_manager_class != nullptr &&
+      std::strcmp(name, "com/supercell/titan/NativeDialogManager") == 0) {
+    return g_native_dialog_manager_class;
+  }
+
+  jclass result = nullptr;
+  if (g_original_titan_find_class != nullptr) {
+    result = g_original_titan_find_class(name);
+  }
+  if (result != nullptr) {
+    return result;
+  }
+  if (g_java_vm != nullptr) {
+    JNIEnv *env = nullptr;
+    if (g_java_vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_OK && env != nullptr) {
+      if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+      }
+    }
+  }
+
+  if (g_java_vm != nullptr && g_app_class_loader != nullptr && g_class_loader_load_class != nullptr) {
+    JNIEnv *env = nullptr;
+    bool attached_here = false;
+    jint env_res = g_java_vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (env_res == JNI_EDETACHED) {
+      if (g_java_vm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
+        attached_here = true;
+        env_res = JNI_OK;
+      }
+    }
+    if (env_res == JNI_OK && env != nullptr) {
+      std::string binary_name(name);
+      for (char &c : binary_name) {
+        if (c == '/') {
+          c = '.';
+        }
+      }
+      jstring name_str = env->NewStringUTF(binary_name.c_str());
+      if (name_str != nullptr) {
+        jobject loaded = env->CallObjectMethod(g_app_class_loader, g_class_loader_load_class, name_str);
+        env->DeleteLocalRef(name_str);
+        if (env->ExceptionCheck()) {
+          env->ExceptionClear();
+        }
+        if (loaded != nullptr) {
+          jclass global_clazz = static_cast<jclass>(env->NewGlobalRef(loaded));
+          env->DeleteLocalRef(loaded);
+          if (attached_here) {
+            g_java_vm->DetachCurrentThread();
+          }
+          LOGI("probe_hooked_titan_find_class resolved %s via Application ClassLoader: %p", name, global_clazz);
+          return global_clazz;
+        }
+      }
+      if (attached_here) {
+        g_java_vm->DetachCurrentThread();
+      }
+    }
+  }
+  LOGW("probe_hooked_titan_find_class failed to resolve %s", name);
+  return nullptr;
+}
+
+
+
 bool process_uses_ndk_translation() {
   FILE *maps = std::fopen("/proc/self/maps", "r");
   if (maps == nullptr) {
@@ -1375,6 +1517,8 @@ bool install_translated_sha256_compatibility_shim(std::uintptr_t libg_base) {
        static_cast<std::size_t>(kTranslatedSha256InitializerCallOffset));
   return true;
 }
+
+void live_probe_flush_pending(void *manager);
 
 extern "C" std::int32_t cr_render_gate_swap_buffers(void *display, void *surface) {
   process_native_render_request_on_frame_thread();
@@ -1584,6 +1728,103 @@ void dismiss_native_dialogs_if_needed() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Synthetic touch for a live battle.
+//
+// A server-driven battle is not driven by a local command queue: the engine
+// applies the actions the server already decided.  Appending to
+// LogicCommandQueue therefore cannot produce a real play, which this probe
+// confirmed on device -- the command is accepted by the queue and then never
+// appears in the world.  The client still has a genuine input path, though: the
+// one a player's finger takes, which is GameApp::nOnTouchEvent.  Feeding that
+// path a MotionEvent synthesised through the platform InputManager lets the
+// game's own code perform every step it performs for a human -- gesture
+// tracking, hand selection, placement validation and the client-to-server
+// submission -- instead of this probe reimplementing any of it.
+//
+// The events carry the pointer id, down/up pairing and coordinates of a real
+// drag, and they are injected on the UI thread so the game observes them exactly
+// as it observes hardware input.
+
+// In a server-driven live battle, injecting into LogicCommandQueue is dropped
+// by the authoritative game server. The native client expects user input through
+// GameApp::nOnTouchEvent (libg.so + 0x013d0be0).
+//
+// We call Supercell's original GameApp.nOnTouchEvent trampoline directly inside
+// the process via native_touch_inject(action, x, y, pointer_id). This requires
+// zero Android permissions and executes identically to physical user touches.
+
+std::atomic<std::int32_t> g_live_touch_width{720};
+std::atomic<std::int32_t> g_live_touch_height{1280};
+
+bool format_live_touch_api(char *response, std::size_t response_size) {
+  if (response == nullptr || response_size < 1024) {
+    return false;
+  }
+  const bool installed = is_native_touch_installed();
+  const std::int32_t w = g_live_touch_width.load(std::memory_order_relaxed);
+  const std::int32_t h = g_live_touch_height.load(std::memory_order_relaxed);
+  const int written = std::snprintf(
+      response, response_size,
+      "{\"ok\":true,\"mode\":\"live-touch-native\","
+      "\"installed\":%s,\"width\":%d,\"height\":%d}",
+      installed ? "true" : "false", w, h);
+  return written > 0 && static_cast<std::size_t>(written) < response_size;
+}
+
+void run_live_touch_tap(std::int32_t x, std::int32_t y) {
+  if (!is_native_touch_installed()) {
+    LOGE("live touch tap: native touch interceptor not installed");
+    return;
+  }
+  native_touch_inject(0 /*ACTION_DOWN*/, x, y, 0);
+  usleep(20 * 1000); // 20ms hold
+  native_touch_inject(1 /*ACTION_UP*/, x, y, 0);
+  LOGI("live touch tap finished at (%d, %d)", x, y);
+}
+
+void run_live_touch_drag(std::int32_t from_x, std::int32_t from_y, std::int32_t to_x, std::int32_t to_y) {
+  if (!is_native_touch_installed()) {
+    LOGE("live touch drag: native touch interceptor not installed");
+    return;
+  }
+  native_touch_inject(0 /*ACTION_DOWN*/, from_x, from_y, 0);
+  usleep(15 * 1000);
+  native_touch_inject(2 /*ACTION_MOVE*/, (from_x + to_x) / 2, (from_y + to_y) / 2, 0);
+  usleep(15 * 1000);
+  native_touch_inject(2 /*ACTION_MOVE*/, to_x, to_y, 0);
+  usleep(15 * 1000);
+  native_touch_inject(1 /*ACTION_UP*/, to_x, to_y, 0);
+  LOGI("live touch drag finished: (%d,%d) -> (%d,%d)", from_x, from_y, to_x, to_y);
+}
+
+// Perform ultra-fast single-pass Drag-and-Drop gesture (near 0ms latency):
+// 1. Press down on the hand card (ACTION_DOWN)
+// 2. Drag directly to the target arena coordinate (ACTION_MOVE)
+// 3. Release at the arena target to deploy (ACTION_UP)
+// Total gesture duration: ~4ms
+void run_live_touch_gesture(std::int32_t from_x, std::int32_t from_y, std::int32_t to_x, std::int32_t to_y) {
+  if (!is_native_touch_installed()) {
+    LOGE("live touch gesture: native touch interceptor not installed");
+    return;
+  }
+
+  // 1. Press down on card in hand
+  const bool card_down = native_touch_inject(0 /*ACTION_DOWN*/, from_x, from_y, 0);
+  usleep(2 * 1000);
+
+  // 2. Drag to arena target
+  const bool drag_move = native_touch_inject(2 /*ACTION_MOVE*/, to_x, to_y, 0);
+  usleep(2 * 1000);
+
+  // 3. Release at arena target to complete deployment
+  const bool arena_up = native_touch_inject(1 /*ACTION_UP*/, to_x, to_y, 0);
+
+  const bool ok = card_down && drag_move && arena_up;
+  LOGI("live fast drag gesture (%d,%d)->(%d,%d) all=%d down=%d move=%d up=%d",
+       from_x, from_y, to_x, to_y, ok ? 1 : 0, card_down ? 1 : 0, drag_move ? 1 : 0, arena_up ? 1 : 0);
+}
+
 void *lookup_json_member(void *json_object, const char *key) {
   if (json_object == nullptr || key == nullptr || g_json_member_find == nullptr) {
     return nullptr;
@@ -1597,7 +1838,7 @@ void *lookup_json_member(void *json_object, const char *key) {
     return nullptr;
   }
   void *value = nullptr;
-  std::memcpy(&value, static_cast<std::uint8_t *>(entry) + 0x20, sizeof(value));
+  std::memcpy(&value, static_cast<const std::uint8_t *>(entry) + 0x20, sizeof(value));
   return value;
 }
 
@@ -6409,6 +6650,7 @@ bool handle_replay_schedule_command(int socket_fd, const char *command) {
 
 #include "resident_multimatch.inc"
 #include "engine_instance.inc"
+#include "live_probe.inc"
 
 void handle_control_command(int socket_fd, const char *command) {
   char response[kControlResponseBytes] = {};
@@ -6429,6 +6671,243 @@ void handle_control_command(int socket_fd, const char *command) {
       resident_save_bound_slot();
       resident_send_status(socket_fd);
     }
+    return;
+  }
+  if (std::strcmp(command, "live-status") == 0) {
+    if (!format_live_probe_status(response, sizeof(response))) {
+      send_control_error(socket_fd, "live battle status is unavailable");
+      return;
+    }
+    send_control_response(socket_fd, response);
+    return;
+  }
+  if (std::strncmp(command, "live-scan", 9) == 0) {
+    std::size_t requested = 0;
+    if (command[9] == ' ') {
+      const long parsed = std::strtol(command + 10, nullptr, 10);
+      if (parsed > 0) {
+        requested = static_cast<std::size_t>(parsed);
+      }
+    }
+    if (!format_live_probe_scan(response, sizeof(response), requested)) {
+      send_control_error(socket_fd, "live battle scan is unavailable");
+      return;
+    }
+    send_control_response(socket_fd, response);
+    return;
+  }
+  if (std::strcmp(command, "live-outbound") == 0) {
+    if (!format_live_probe_outbound(response, sizeof(response))) {
+      send_control_error(socket_fd, "live outbound reconnaissance is unavailable");
+      return;
+    }
+    send_control_response(socket_fd, response);
+    return;
+  }
+  if (std::strcmp(command, "live-touch-api") == 0) {
+    if (!format_live_touch_api(response, sizeof(response))) {
+      send_control_error(socket_fd, "live touch API report is unavailable");
+      return;
+    }
+    send_control_response(socket_fd, response);
+    return;
+  }
+  if (std::strncmp(command, "live-touch-layout", 17) == 0) {
+    long long w = 0;
+    long long h = 0;
+    const int fields = std::sscanf(command + 17, " %lld %lld", &w, &h);
+    if (fields == 2 && w > 0 && h > 0) {
+      g_live_touch_width.store(static_cast<std::int32_t>(w), std::memory_order_relaxed);
+      g_live_touch_height.store(static_cast<std::int32_t>(h), std::memory_order_relaxed);
+      set_native_touch_layout_dimensions(static_cast<std::int32_t>(w), static_cast<std::int32_t>(h));
+    }
+    char buf[128] = {};
+    std::snprintf(buf, sizeof(buf), "{\"ok\":true,\"width\":%d,\"height\":%d}",
+                  g_live_touch_width.load(std::memory_order_relaxed),
+                  g_live_touch_height.load(std::memory_order_relaxed));
+    send_control_response(socket_fd, buf);
+    return;
+  }
+  if (std::strcmp(command, "live-tap-ability") == 0) {
+    if (!is_native_touch_installed()) {
+      send_control_error(socket_fd, "native touch interceptor not installed");
+      return;
+    }
+    const auto layout = cr_native_touch::compute_live_touch_layout(
+        g_live_touch_width.load(std::memory_order_relaxed),
+        g_live_touch_height.load(std::memory_order_relaxed));
+    const std::int32_t x = layout.ability_x;
+    const std::int32_t y = layout.ability_y;
+    std::thread([x, y]() { run_live_touch_tap(x, y); }).detach();
+    char resp[128] = {};
+    std::snprintf(resp, sizeof(resp), "{\"ok\":true,\"abilityTapped\":true,\"x\":%d,\"y\":%d}", x, y);
+    send_control_response(socket_fd, resp);
+    return;
+  }
+  if (std::strncmp(command, "live-tap ", 9) == 0) {
+    long long from_x_raw = 0;
+    long long from_y_raw = 0;
+    long long to_x_raw = 0;
+    long long to_y_raw = 0;
+    const int fields = std::sscanf(command + 9, " %lld %lld %lld %lld", &from_x_raw, &from_y_raw, &to_x_raw, &to_y_raw);
+    if (fields == 2) {
+      // Single tap
+      const std::int32_t x = static_cast<std::int32_t>(from_x_raw);
+      const std::int32_t y = static_cast<std::int32_t>(from_y_raw);
+      std::thread([x, y]() { run_live_touch_tap(x, y); }).detach();
+      send_control_response(socket_fd, "{\"ok\":true,\"tapDispatched\":true}");
+      return;
+    }
+    if (fields == 4) {
+      // Tap-to-place gesture (card -> arena)
+      const std::int32_t from_x = static_cast<std::int32_t>(from_x_raw);
+      const std::int32_t from_y = static_cast<std::int32_t>(from_y_raw);
+      const std::int32_t to_x = static_cast<std::int32_t>(to_x_raw);
+      const std::int32_t to_y = static_cast<std::int32_t>(to_y_raw);
+      std::thread([from_x, from_y, to_x, to_y]() { run_live_touch_gesture(from_x, from_y, to_x, to_y); }).detach();
+      send_control_response(socket_fd, "{\"ok\":true,\"gestureDispatched\":true}");
+      return;
+    }
+    send_control_error(socket_fd, "live-tap expects X Y or FROM_X FROM_Y TO_X TO_Y");
+    return;
+  }
+  if (std::strncmp(command, "live-drag", 9) == 0) {
+    long long from_x_raw = 0;
+    long long from_y_raw = 0;
+    long long to_x_raw = 0;
+    long long to_y_raw = 0;
+    const int fields = std::sscanf(command + 9, " %lld %lld %lld %lld", &from_x_raw, &from_y_raw, &to_x_raw, &to_y_raw);
+    if (fields != 4) {
+      send_control_error(socket_fd, "live-drag expects FROM_X FROM_Y TO_X TO_Y");
+      return;
+    }
+    const std::int32_t from_x = static_cast<std::int32_t>(from_x_raw);
+    const std::int32_t from_y = static_cast<std::int32_t>(from_y_raw);
+    const std::int32_t to_x = static_cast<std::int32_t>(to_x_raw);
+    const std::int32_t to_y = static_cast<std::int32_t>(to_y_raw);
+    std::thread([from_x, from_y, to_x, to_y]() { run_live_touch_drag(from_x, from_y, to_x, to_y); }).detach();
+    send_control_response(socket_fd, "{\"ok\":true,\"dragDispatched\":true}");
+    return;
+  }
+  if (std::strncmp(command, "live-touch-deploy", 17) == 0) {
+    unsigned long long owner = 0;
+    unsigned long long hand_index = 0;
+    long long world_x = 0;
+    long long world_y = 0;
+    const int fields = std::sscanf(command + 17, " %llu %llu %lld %lld", &owner, &hand_index, &world_x, &world_y);
+    if (fields == 3) {
+      // Backwards compatible: HAND_INDEX WORLD_X WORLD_Y (owner defaults to 0)
+      world_y = world_x;
+      world_x = hand_index;
+      hand_index = owner;
+      owner = 0;
+    } else if (fields != 4 || hand_index > 3) {
+      send_control_error(socket_fd, "live-touch-deploy expects [OWNER] HAND_INDEX (0-3) WORLD_X WORLD_Y");
+      return;
+    }
+    const auto layout = cr_native_touch::compute_live_touch_layout(
+        g_live_touch_width.load(std::memory_order_relaxed),
+        g_live_touch_height.load(std::memory_order_relaxed));
+    const std::int32_t card_x = layout.hand_centers_x[hand_index];
+    const std::int32_t card_y = layout.bottom_hand_y;
+    std::int32_t arena_x = 0;
+    std::int32_t arena_y = 0;
+    cr_native_touch::live_world_to_arena_pixel(layout, static_cast<std::int32_t>(owner),
+                                               static_cast<std::int32_t>(world_x),
+                                               static_cast<std::int32_t>(world_y), arena_x, arena_y);
+    std::thread([card_x, card_y, arena_x, arena_y]() {
+      run_live_touch_gesture(card_x, card_y, arena_x, arena_y);
+    }).detach();
+    char resp[128] = {};
+    std::snprintf(resp, sizeof(resp), "{\"ok\":true,\"touchDeployed\":true,\"card\":[%d,%d],\"arena\":[%d,%d]}",
+                  card_x, card_y, arena_x, arena_y);
+    send_control_response(socket_fd, resp);
+    return;
+  }
+  if (std::strncmp(command, "live-deploy", 11) == 0) {
+    unsigned long long owner = 0;
+    unsigned long long hand_index = 0;
+    long long world_x = 0;
+    long long world_y = 0;
+    const int fields = std::sscanf(command + 11, " %llu %llu %lld %lld", &owner, &hand_index, &world_x, &world_y);
+    if (fields != 4 || owner >= kPlayerCount || hand_index > 8) {
+      send_control_error(socket_fd, "live-deploy expects OWNER HAND_INDEX WORLD_X WORLD_Y");
+      return;
+    }
+    void *const manager = live_probe_current_manager();
+    if (manager == nullptr) {
+      send_control_error(socket_fd, "live-deploy has no active live battle manager");
+      return;
+    }
+    const bool queued = live_probe_resolve_and_queue(
+        manager, static_cast<std::int32_t>(owner),
+        static_cast<std::int32_t>(hand_index),
+        static_cast<std::int32_t>(world_x),
+        static_cast<std::int32_t>(world_y));
+    if (!queued) {
+      send_control_error(socket_fd, "live-deploy could not resolve hand deploy from the live battle");
+      return;
+    }
+    char resp[128] = {};
+    std::snprintf(resp, sizeof(resp), "{\"ok\":true,\"queued\":true,\"mode\":\"native-controller\"}");
+    send_control_response(socket_fd, resp);
+    return;
+  }
+  if (std::strcmp(command, "live-close") == 0) {
+    // Drop the recorded live manager reference after a battle ends so the next
+    // session does not inject into a stale, freed manager.
+    g_live_manager.store(nullptr, std::memory_order_release);
+    end_combat_event_epoch(nullptr);
+    g_last_live_close_ns.store(process_monotonic_now_ns(), std::memory_order_release);
+    pthread_mutex_lock(&g_live_mailbox_mutex);
+    g_live_pending_sequence = 0;
+    g_live_processed_sequence = 0;
+    g_live_pending_json[0] = '\0';
+    pthread_mutex_unlock(&g_live_mailbox_mutex);
+    send_control_response(socket_fd, "{\"ok\":true,\"liveClosed\":true}");
+    return;
+  }
+  if (std::strcmp(command, "live-observe-atomic") == 0) {
+    static std::unique_ptr<char[]> live_atomic(new (std::nothrow) char[kFullObservationResponseBytes]());
+    if (live_atomic == nullptr) {
+      send_control_error(socket_fd, "live atomic observation workspace unavailable");
+      return;
+    }
+    live_atomic[0] = '\0';
+    pthread_mutex_lock(&g_control_mutex);
+    const bool built = live_probe_build_atomic_json(live_atomic.get(), kFullObservationResponseBytes);
+    pthread_mutex_unlock(&g_control_mutex);
+    if (!built && live_atomic[0] == '\0') {
+      send_control_error(socket_fd, "live atomic observation could not be encoded");
+      return;
+    }
+    send_control_response(socket_fd, live_atomic.get());
+    return;
+  }
+  if (std::strcmp(command, "live-observe") == 0 || std::strncmp(command, "live-observe ", 13) == 0) {
+    void *const manager = live_probe_current_manager();
+    if (manager == nullptr) {
+      send_control_error(socket_fd, "live-observe has no active live battle manager");
+      return;
+    }
+    if (!live_probe_manager_graph_readable(manager)) {
+      send_control_error(socket_fd, "live-observe battle graph is not safely readable");
+      return;
+    }
+    static std::unique_ptr<char[]> live_response(new (std::nothrow) char[kFullObservationResponseBytes]());
+    if (live_response == nullptr) {
+      send_control_error(socket_fd, "live observation workspace unavailable");
+      return;
+    }
+    live_response[0] = '\0';
+    const std::uint64_t live_generation = g_live_generation.load(std::memory_order_acquire);
+    const bool built = build_rich_observation_json(manager, live_generation, live_response.get(),
+                                                   kFullObservationResponseBytes);
+    if (!built && live_response[0] == '\0') {
+      send_control_error(socket_fd, "live observation could not be encoded");
+      return;
+    }
+    send_control_response(socket_fd, live_response.get());
     return;
   }
   if (std::strcmp(command, "multi-stop") == 0) {
@@ -7323,7 +7802,7 @@ void handle_control_command(int socket_fd, const char *command) {
   send_control_error(
       socket_fd,
       "commands: configure REPLAY_JSON, configure-native REPLAY_JSON, "
-      "status, attest, touch status, "
+      "status, attest, touch status, live-status, live-scan [N], live-outbound, live-touch-api, live-touch-layout [W H], live-tap [X Y | FROM_X FROM_Y TO_X TO_Y], live-drag FROM_X FROM_Y TO_X TO_Y, live-touch-deploy HAND WORLD_X WORLD_Y, live-observe, live-observe-atomic, live-deploy OWNER HAND_INDEX WORLD_X WORLD_Y, live-close, "
       "render on|off|status, observe, observe-rich, observe-atomic, session-v1, reset, step N, advance-native N, play DELAY ADVANCE "
       "COUNT [OWNER HAND_INDEX X Y]..., transition DELAY ADVANCE COUNT [PLAYER CARD PD X Y]..., deploy PLAYER CARD PD "
       "X Y [DELAY], activate-ability OWNER OBJECT_INDEX SECONDARY_INDEX [DELAY], replay-schedule-card OWNER CARD_ID X "
@@ -7858,6 +8337,11 @@ void game_state_step_hook(void *manager) {
     process_scheduled_replay_actions(manager);
     process_pending_native_command(manager);
   }
+  // Live (server-driven) battles step through the same GameStateManager::step
+  // on the game thread.  Drain one queued live deploy on that thread so the
+  // inject appends through the engine's own command queue without racing the
+  // game-side mutation of the queue.
+  live_probe_flush_pending(manager);
   bool controlled = false;
   bool skip_step_for_reset = false;
   for (;;) {
@@ -8375,6 +8859,10 @@ bool install_hooks(std::uintptr_t libg_base) {
   g_logic_data_by_global_id = reinterpret_cast<LogicDataByGlobalId>(libg_base + kLogicDataByGlobalIdOffset);
   g_location_tilemap_ensure = reinterpret_cast<LocationTileMapEnsure>(libg_base + kLocationTileMapEnsureOffset);
   g_location_tilemap_lookup = reinterpret_cast<LocationTileMapLookup>(libg_base + kLocationTileMapLookupOffset);
+  g_get_active_battle_controller =
+      reinterpret_cast<GetActiveBattleController>(libg_base + kGetActiveBattleControllerOffset);
+  g_finish_player_command =
+      reinterpret_cast<FinishPlayerCommand>(libg_base + kFinishPlayerCommandOffset);
   const NativeHookSpec runner_hooks[] = {
       native_hook(kNativeReplayRunnerOffset, kNativeReplayRunnerPrologue, &native_replay_runner_hook,
                   &g_original_native_replay_runner, "native replay pre-run", &g_hook_native_replay_runner),
@@ -8435,8 +8923,141 @@ bool install_hooks(std::uintptr_t libg_base) {
   // Dagger Duchess inventory and Royal Chef cooking live in their starting
   // Action runtimes, outside ordinary object/component snapshots.
   install_tower_troop_runtime_hooks(libg_base);
+  install_inline_hook(libg_base, kTitanFindClassOffset, kTitanFindClassPrologue,
+                      reinterpret_cast<const void *>(&probe_hooked_titan_find_class),
+                      reinterpret_cast<void **>(&g_original_titan_find_class),
+                      "Titan::findClass");
+  install_inline_hook(libg_base, kInitGooglePlayReviewOffset, kInitGooglePlayReviewPrologue,
+                      reinterpret_cast<const void *>(&probe_hooked_init_google_play_review),
+                      &g_original_init_google_play_review,
+                      "GooglePlayReview::init");
+  install_inline_hook(libg_base, kRequestGooglePlayReviewOffset, kRequestGooglePlayReviewPrologue,
+                      reinterpret_cast<const void *>(&probe_hooked_request_google_play_review),
+                      &g_original_request_google_play_review,
+                      "GooglePlayReview::requestReviewFlow");
+  install_inline_hook(libg_base, kRequestGooglePlayReviewInnerOffset, kRequestGooglePlayReviewInnerPrologue,
+                      reinterpret_cast<const void *>(&probe_hooked_request_google_play_review),
+                      &g_original_request_google_play_review_inner,
+                      "GooglePlayReview::requestReviewFlowInner");
+  install_inline_hook(libg_base, kTaskAddOnCompleteListenerOffset, kTaskAddOnCompleteListenerPrologue,
+                      reinterpret_cast<const void *>(&probe_hooked_task_add_on_complete_listener),
+                      &g_original_task_add_on_complete_listener,
+                      "Task::addOnCompleteListener");
   g_hook_install_ok.store(success, std::memory_order_release);
   return success;
+}
+
+struct sigaction g_old_sigsegv = {};
+struct sigaction g_old_sigbus = {};
+struct sigaction g_old_sigabrt = {};
+struct sigaction g_old_sigfpe = {};
+struct sigaction g_old_sigill = {};
+
+void probe_fatal_signal_handler(int sig, siginfo_t *info, void *ucontext_raw) {
+  auto *uc = static_cast<ucontext_t *>(ucontext_raw);
+  const char *sig_name = "UNKNOWN";
+  switch (sig) {
+    case SIGSEGV: sig_name = "SIGSEGV"; break;
+    case SIGBUS:  sig_name = "SIGBUS";  break;
+    case SIGABRT: sig_name = "SIGABRT"; break;
+    case SIGFPE:  sig_name = "SIGFPE";  break;
+    case SIGILL:  sig_name = "SIGILL";  break;
+  }
+
+  void *pc = nullptr;
+  void *lr = nullptr;
+  void *sp = nullptr;
+  void *fp = nullptr;
+#if defined(__aarch64__)
+  if (uc != nullptr) {
+    pc = reinterpret_cast<void *>(uc->uc_mcontext.pc);
+    lr = reinterpret_cast<void *>(uc->uc_mcontext.regs[30]);
+    sp = reinterpret_cast<void *>(uc->uc_mcontext.sp);
+    fp = reinterpret_cast<void *>(uc->uc_mcontext.regs[29]);
+  }
+#endif
+
+  const std::uintptr_t pc_val = reinterpret_cast<std::uintptr_t>(pc);
+  const std::uintptr_t lr_val = reinterpret_cast<std::uintptr_t>(lr);
+  long long pc_offset = -1;
+  const char *pc_mod = "unknown";
+  if (g_libg_base != 0 && pc_val >= g_libg_base && pc_val < g_libg_base + 0x3000000ULL) {
+    pc_offset = static_cast<long long>(pc_val - g_libg_base);
+    pc_mod = "libg.so";
+  }
+
+  long long lr_offset = -1;
+  const char *lr_mod = "unknown";
+  if (g_libg_base != 0 && lr_val >= g_libg_base && lr_val < g_libg_base + 0x3000000ULL) {
+    lr_offset = static_cast<long long>(lr_val - g_libg_base);
+    lr_mod = "libg.so";
+  }
+
+  char crash_msg[1024] = {};
+  std::snprintf(crash_msg, sizeof(crash_msg),
+                "=== FATAL CRASH: signal %d (%s), code=%d, addr=%p, PC=%p (%s+0x%llx), LR=%p (%s+0x%llx), SP=%p, FP=%p ===",
+                sig, sig_name, info ? info->si_code : -1, info ? info->si_addr : nullptr,
+                pc, pc_mod, pc_offset >= 0 ? static_cast<unsigned long long>(pc_offset) : 0ULL,
+                lr, lr_mod, lr_offset >= 0 ? static_cast<unsigned long long>(lr_offset) : 0ULL,
+                sp, fp);
+
+  __android_log_print(ANDROID_LOG_FATAL, "CRProbeCrash", "%s", crash_msg);
+
+  FILE *f = std::fopen("/sdcard/cr_crash.log", "a");
+  if (f == nullptr) {
+    f = std::fopen("/data/data/nullsroyale.rel.free/cr_crash.log", "a");
+  }
+  if (f != nullptr) {
+    std::fprintf(f, "%s\n", crash_msg);
+    std::fflush(f);
+    std::fclose(f);
+  }
+
+  struct sigaction *old_sa = nullptr;
+  switch (sig) {
+    case SIGSEGV: old_sa = &g_old_sigsegv; break;
+    case SIGBUS:  old_sa = &g_old_sigbus;  break;
+    case SIGABRT: old_sa = &g_old_sigabrt; break;
+    case SIGFPE:  old_sa = &g_old_sigfpe;  break;
+    case SIGILL:  old_sa = &g_old_sigill;  break;
+  }
+  if (old_sa != nullptr && old_sa->sa_sigaction != nullptr &&
+      (old_sa->sa_flags & SA_SIGINFO)) {
+    old_sa->sa_sigaction(sig, info, ucontext_raw);
+    return;
+  }
+  if (old_sa != nullptr && old_sa->sa_handler != nullptr &&
+      old_sa->sa_handler != SIG_DFL && old_sa->sa_handler != SIG_IGN) {
+    old_sa->sa_handler(sig);
+    return;
+  }
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+
+void install_crash_signal_handlers() {
+  static std::atomic<bool> installed{false};
+  if (installed.exchange(true)) {
+    return;
+  }
+  static uint8_t alt_stack[SIGSTKSZ * 2];
+  stack_t ss = {};
+  ss.ss_sp = alt_stack;
+  ss.ss_size = sizeof(alt_stack);
+  ss.ss_flags = 0;
+  sigaltstack(&ss, nullptr);
+
+  struct sigaction sa = {};
+  sa.sa_sigaction = probe_fatal_signal_handler;
+  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+  sigemptyset(&sa.sa_mask);
+
+  sigaction(SIGSEGV, &sa, &g_old_sigsegv);
+  sigaction(SIGBUS, &sa, &g_old_sigbus);
+  sigaction(SIGABRT, &sa, &g_old_sigabrt);
+  sigaction(SIGFPE, &sa, &g_old_sigfpe);
+  sigaction(SIGILL, &sa, &g_old_sigill);
+  LOGI("native crash signal handlers installed (SIGSEGV, SIGBUS, SIGABRT, SIGFPE, SIGILL)");
 }
 
 void initialize_probe_runtime_once(std::uintptr_t libg_base) {
@@ -8445,6 +9066,7 @@ void initialize_probe_runtime_once(std::uintptr_t libg_base) {
                                                        std::memory_order_acquire)) {
     return;
   }
+  install_crash_signal_handlers();
   const bool hooks_installed = install_hooks(libg_base);
   LOGI("runner hook installation complete=%d deferred=%d", hooks_installed ? 1 : 0,
        g_deferred_probe_bootstrap_started.load(std::memory_order_acquire) ? 1 : 0);
@@ -8529,20 +9151,43 @@ extern "C" JNIEXPORT void JNICALL Java_com_supercell_titan_GameApp_nativeBootstr
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
   initialize_engine_instance();
   g_java_vm = vm;
+  set_native_touch_java_vm(vm);
   JNIEnv *env = nullptr;
   if (vm != nullptr && vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_OK && env != nullptr) {
     jclass local_dialog_manager = env->FindClass("com/supercell/titan/NativeDialogManager");
     if (local_dialog_manager != nullptr) {
       g_native_dialog_manager_class = static_cast<jclass>(env->NewGlobalRef(local_dialog_manager));
-      env->DeleteLocalRef(local_dialog_manager);
       if (g_native_dialog_manager_class != nullptr) {
         g_native_dialog_dismiss_all =
             env->GetStaticMethodID(g_native_dialog_manager_class, "nativeDialogDismissAll", "()V");
+
+        jclass class_clazz = env->GetObjectClass(g_native_dialog_manager_class);
+        if (class_clazz != nullptr) {
+          jmethodID get_class_loader =
+              env->GetMethodID(class_clazz, "getClassLoader", "()Ljava/lang/ClassLoader;");
+          if (get_class_loader != nullptr) {
+            jobject loader = env->CallObjectMethod(g_native_dialog_manager_class, get_class_loader);
+            if (loader != nullptr) {
+              g_app_class_loader = env->NewGlobalRef(loader);
+              jclass loader_clazz = env->GetObjectClass(loader);
+              if (loader_clazz != nullptr) {
+                g_class_loader_load_class =
+                    env->GetMethodID(loader_clazz, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+                env->DeleteLocalRef(loader_clazz);
+              }
+              env->DeleteLocalRef(loader);
+            }
+          }
+          env->DeleteLocalRef(class_clazz);
+        }
       }
+      env->DeleteLocalRef(local_dialog_manager);
     }
     if (env->ExceptionCheck()) {
       env->ExceptionClear();
     }
+    LOGI("JNI_OnLoad resolved NativeDialogManager=%p dismiss_all=%p class_loader=%p",
+         g_native_dialog_manager_class, g_native_dialog_dismiss_all, g_app_class_loader);
   }
   const std::uintptr_t libg_base = find_libg_base();
   if (libg_base == 0) {

@@ -65,6 +65,7 @@ bool probe_submit_native_touch_hand_action(void *, std::int32_t owner, std::int3
 }
 
 bool install_probe_native_touch(std::uintptr_t libg_base) {
+  set_native_touch_layout_dimensions(720, 1280);
   NativeTouchBindings bindings;
   bindings.is_native_render_ready = &probe_native_touch_ready;
   bindings.native_render_generation = &probe_native_touch_generation;

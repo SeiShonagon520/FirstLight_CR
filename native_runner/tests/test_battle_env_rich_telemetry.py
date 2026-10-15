@@ -1093,6 +1093,9 @@ def _set_tower_troop_runtime(
 def _rich(ordinary: dict[str, object]) -> dict[str, object]:
     rich_objects: list[dict[str, object]] = []
     for raw in ordinary["objects"]:  # type: ignore[union-attr]
+        if raw.get("null"):
+            rich_objects.append({"slot": raw["slot"], "null": True})
+            continue
         item = dict(raw)
         entity_key = [item["owner"], -2, item["nativeObjectId"]]
         rich_objects.append(

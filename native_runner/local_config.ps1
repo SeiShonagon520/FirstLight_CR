@@ -1,8 +1,11 @@
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
 # Shared literal KEY=value reader. Existing process variables take precedence.
 function Import-LocalEnv {
     $configurationPath = Join-Path (Split-Path -Parent $PSScriptRoot) ".env"
     if (Test-Path -LiteralPath $configurationPath -PathType Leaf) {
-        foreach ($line in [IO.File]::ReadAllLines($configurationPath)) {
+        foreach ($line in [IO.File]::ReadAllLines($configurationPath, [System.Text.Encoding]::UTF8)) {
             $entry = $line.Trim()
             if (-not $entry -or $entry.StartsWith('#')) { continue }
             if ($entry -notmatch '^([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') {

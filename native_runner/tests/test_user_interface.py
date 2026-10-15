@@ -169,6 +169,55 @@ def test_ai_duel_launches_both_checkpoints_and_decks(monkeypatch, tmp_path: Path
     assert app.model_match_kind == "duel"
 
 
+@pytest.mark.parametrize(
+    "mode_name,expected_mode_id",
+    interface.DUEL_GAME_MODES,
+)
+def test_ai_duel_game_modes(monkeypatch, tmp_path: Path, mode_name: str, expected_mode_id: int) -> None:
+    checkpoints = (tmp_path / "top.pt", tmp_path / "bottom.pt")
+    for checkpoint in checkpoints:
+        checkpoint.write_bytes(b"checkpoint")
+    monkeypatch.setattr(interface, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(interface, "_new_match_seed", lambda: 34567)
+    app = object.__new__(interface.CRHarnessInterface)
+    app.busy = False
+    app.owns_native_session = True
+    app.duel_checkpoint0_var = _FakeVar(str(checkpoints[0]))
+    app.duel_checkpoint1_var = _FakeVar(str(checkpoints[1]))
+    app.duel_game_mode_var = _FakeVar(mode_name)
+    app.duel_deck0_editor = SimpleNamespace(
+        values=lambda: (interface.PEKKA_BRIDGE_SPAM_DECK, interface.PEKKA_BRIDGE_SPAM_FORMS),
+        tower_troop_id=lambda: 159_000_002,
+    )
+    app.duel_deck1_editor = SimpleNamespace(
+        values=app.duel_deck0_editor.values,
+        tower_troop_id=lambda: 159_000_004,
+    )
+    app.duel_status_var = _FakeVar()
+    app._confirm_replace_owned_session = lambda _kind: True
+    app._check_operation_conflicts = lambda: True
+    app.stop_replay = lambda: None
+    app._terminate_overlay = lambda: None
+    app._set_model_active = lambda _active: None
+    captured: dict[str, object] = {}
+
+    def launch(module, _log_path, **options):
+        captured.update(module=module, **options)
+        return SimpleNamespace(poll=lambda: 0, returncode=0), None
+
+    app._launch_python = launch
+    app._background = lambda _name, run, _success, _failed: run()
+
+    app.start_ai_duel()
+
+    config = json.loads((app.model_artifact_dir / "match.json").read_text(encoding="utf-8"))
+    assert config["game_mode"] == expected_mode_id
+    if expected_mode_id == 72000491:
+        # In all evolution, cards with evo support should have bit 0 set
+        for f in config["deck0_form_availability"][:2]:
+            assert f & 1 == 1
+
+
 def test_force_ai_play_sends_request_to_chosen_side(tmp_path: Path) -> None:
     app = object.__new__(interface.CRHarnessInterface)
     app.model_match_kind = "duel"
@@ -180,6 +229,18 @@ def test_force_ai_play_sends_request_to_chosen_side(tmp_path: Path) -> None:
 
     assert (tmp_path / "force-1").exists()
     assert not (tmp_path / "force-0").exists()
+
+
+def test_force_live_deploy_touches_force_act(tmp_path: Path) -> None:
+    app = object.__new__(interface.CRHarnessInterface)
+    app.live_active = True
+    app.live_artifact_dir = tmp_path
+    app._append_log = lambda _msg: None
+    app._append_live_monitor = lambda _msg: None
+
+    app.force_live_deploy()
+
+    assert (tmp_path / "force_act").exists()
 
 
 def test_custom_collected_replay_directory_is_exclusive(
@@ -710,3 +771,243 @@ def test_saved_decks_reject_invalid_file_without_replacing_it(tmp_path: Path) ->
         interface.load_saved_decks(path)
 
     assert path.read_text(encoding="utf-8").startswith('{"version": 1')
+
+
+def test_set_online_session_builds_powershell_command(monkeypatch, tmp_path: Path) -> None:
+    fake_script = tmp_path / "online_session.ps1"
+    fake_script.write_text("# online script", encoding="utf-8")
+    monkeypatch.setattr(interface, "ONLINE_SESSION_SCRIPT", fake_script)
+    captured_args = []
+
+    def fake_run_hidden(args, *, timeout, cwd=None):
+        captured_args.extend(args)
+        return subprocess.CompletedProcess(args, 0, '{"ok": true, "pid": "12345"}', "")
+
+    monkeypatch.setattr(interface, "_run_hidden", fake_run_hidden)
+    progress_messages = []
+    result = interface.set_online_session(progress_messages.append, restore_offline=False)
+
+    assert result["ok"] is True
+    assert "-File" in captured_args
+    assert str(fake_script) in captured_args
+    assert "-RestoreOffline" not in captured_args
+
+    captured_args.clear()
+    result_offline = interface.set_online_session(progress_messages.append, restore_offline=True, no_launch=True)
+    assert "-RestoreOffline" in captured_args
+    assert "-NoLaunch" in captured_args
+
+
+def test_ensure_online_session_skips_when_probe_ready(monkeypatch) -> None:
+    monkeypatch.setattr(interface, "_probe_native", lambda cmd: {"ok": True, "installed": True} if cmd == "live-touch-api" else None)
+    called = []
+    monkeypatch.setattr(interface, "set_online_session", lambda *a, **kw: called.append(True))
+    res = interface.ensure_online_session(lambda msg: None)
+    assert res.get("already_ready") is True
+    assert len(called) == 0
+
+
+def test_quick_tap_hand_and_deploy_send_probe_commands(monkeypatch) -> None:
+    sent_commands = []
+    monkeypatch.setattr(interface, "_probe_native", lambda cmd: sent_commands.append(cmd) or {"ok": True, "cardPixel": [141, 1166], "arenaPixel": [359, 803]})
+
+    app = object.__new__(interface.CRHarnessInterface)
+    app.live_touch_status_var = _FakeVar()
+    app._append_log = lambda _msg: None
+    app._append_live_monitor = lambda _msg: None
+    app._background = lambda _name, work, done, _failed: done(work())
+
+    app.quick_tap_hand(0)
+    assert "live-tap 224 1120" in sent_commands
+
+    app.quick_tap_hand(3)
+    assert "live-tap 630 1120" in sent_commands
+
+    app.quick_test_deploy()
+    assert "live-touch-deploy 0 0 10000" in sent_commands
+    assert "下兵手势成功" in app.live_touch_status_var.get()
+
+    app.quick_test_ability()
+    assert "live-tap-ability" in sent_commands
+    assert "技能点击成功" in app.live_touch_status_var.get()
+
+
+def test_start_live_agent_launches_live_module(monkeypatch, tmp_path: Path) -> None:
+    checkpoint = tmp_path / "model.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    monkeypatch.setattr(interface, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(interface, "ensure_online_session", lambda _prog: {"ok": True})
+
+    app = object.__new__(interface.CRHarnessInterface)
+    app.busy = False
+    app.live_active = False
+    app.live_checkpoint_var = _FakeVar(str(checkpoint))
+    app.live_actor_owner_var = _FakeVar("玩家 0 (自己/下方)")
+    app.live_device_box = SimpleNamespace(get=lambda: "cpu")
+    app.live_sample_var = SimpleNamespace(get=lambda: False)
+    app.live_status_var = _FakeVar()
+    app.stop_replay = lambda: None
+    app._terminate_overlay = lambda: None
+    app._set_live_controls_active = lambda _active: None
+    app._append_log = lambda _msg: None
+    app._append_live_monitor = lambda _msg: None
+
+    captured: dict[str, object] = {}
+
+    def launch(module, _log_path, **options):
+        captured.update(module=module, **options)
+        return SimpleNamespace(poll=lambda: 0, returncode=0), None
+
+    app._launch_python = launch
+    app._background = lambda _name, run, done, _failed: done(run())
+
+    app.start_live_agent()
+
+    assert captured["module"] == "native_runner.training.v4.live_agent"
+    assert captured["checkpoint"] == checkpoint
+    assert captured["actor_owner"] == 0
+    assert captured["device"] == "cpu"
+    assert captured["sample"] is False
+
+
+def test_on_live_event_handles_warmup_complete() -> None:
+    app = object.__new__(interface.CRHarnessInterface)
+    app.live_status_var = _FakeVar()
+    logs: list[str] = []
+    monitors: list[str] = []
+    app._append_log = lambda msg: logs.append(msg)
+    app._append_live_monitor = lambda msg: monitors.append(msg)
+
+    app._on_live_event({
+        "event": "warmup-complete",
+        "device": "cuda",
+        "inference_ms": 14.5,
+        "cuda_graph": True,
+        "message": "模型预热完成 (设备: cuda, 预热推理: 14.5ms, CUDA Graph: 已捕获)",
+    })
+
+    assert "模型预热完成" in app.live_status_var.get()
+    assert len(monitors) == 1
+    assert "CUDA Graph: 已捕获" in monitors[0]
+
+
+def test_builtin_decks_are_valid_and_support_meta() -> None:
+    options = {opt.card_id: opt for opt in interface.load_card_options()}
+    assert len(interface.BUILTIN_DECKS) >= 8
+    for preset in interface.BUILTIN_DECKS:
+        assert len(preset.deck) == 8, f"{preset.name} card count != 8"
+        assert len(set(preset.deck)) == 8, f"{preset.name} has duplicate cards"
+        assert len(preset.forms) == 8, f"{preset.name} form count != 8"
+        interface.validate_model_deck_roles(preset.forms)
+        for card_id, mask in zip(preset.deck, preset.forms):
+            assert card_id in options, f"{preset.name} contains unknown card {card_id}"
+            opt = options[card_id]
+            if mask == 1:
+                assert opt.supports_evolution, f"{preset.name}: {opt.name} lacks evo"
+            elif mask == 2:
+                assert opt.supports_hero, f"{preset.name}: {opt.name} lacks hero"
+        assert preset.tower_troop_id in interface.TOWER_TROOP_BY_ID
+
+
+def test_7x_elixir_assigns_8_random_evolutions_and_standard_towers(monkeypatch, tmp_path: Path) -> None:
+    checkpoints = (tmp_path / "top.pt", tmp_path / "bottom.pt")
+    for checkpoint in checkpoints:
+        checkpoint.write_bytes(b"checkpoint")
+    monkeypatch.setattr(interface, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(interface, "_new_match_seed", lambda: 88888)
+    app = object.__new__(interface.CRHarnessInterface)
+    app.busy = False
+    app.owns_native_session = True
+    app.card_options = interface.load_card_options()
+    app.duel_checkpoint0_var = _FakeVar(str(checkpoints[0]))
+    app.duel_checkpoint1_var = _FakeVar(str(checkpoints[1]))
+    app.duel_game_mode_var = _FakeVar("7倍圣水无限火力 (7x Elixir)")
+    
+    deck0_state: list[object] = []
+    deck1_state: list[object] = []
+    app.duel_deck0_editor = SimpleNamespace(
+        values=lambda: (interface.PEKKA_BRIDGE_SPAM_DECK, interface.PEKKA_BRIDGE_SPAM_FORMS),
+        tower_troop_id=lambda: 159_000_000,
+        set_deck=lambda d, f: deck0_state.append((d, f)),
+    )
+    app.duel_deck1_editor = SimpleNamespace(
+        values=lambda: (interface.PEKKA_BRIDGE_SPAM_DECK, interface.PEKKA_BRIDGE_SPAM_FORMS),
+        tower_troop_id=lambda: 159_000_000,
+        set_deck=lambda d, f: deck1_state.append((d, f)),
+    )
+    app.duel_status_var = _FakeVar()
+    app._confirm_replace_owned_session = lambda _kind: True
+    app._check_operation_conflicts = lambda: True
+    app.stop_replay = lambda: None
+    app._terminate_overlay = lambda: None
+    app._set_model_active = lambda _active: None
+    captured: dict[str, object] = {}
+
+    def launch(module, _log_path, **options):
+        captured.update(module=module, **options)
+        return SimpleNamespace(poll=lambda: 0, returncode=0), None
+
+    app._launch_python = launch
+    app._background = lambda _name, run, _success, _failed: run()
+
+    app.start_ai_duel()
+
+    config = json.loads((app.model_artifact_dir / "match.json").read_text(encoding="utf-8"))
+    assert config["game_mode"] == 72000493
+    assert config["location"] == 15000199  # Standard 1v1 3-tower location
+    assert config["arena"] == 54000001
+    assert len(config["deck0"]) == 8 and len(set(config["deck0"])) == 8
+    assert len(config["deck1"]) == 8 and len(set(config["deck1"])) == 8
+    assert config["deck0_form_availability"] == [1] * 8
+    assert config["deck1_form_availability"] == [1] * 8
+
+    # All cards assigned must be valid evolutions
+    options = {opt.card_id: opt for opt in app.card_options}
+    for card_id in config["deck0"] + config["deck1"]:
+        assert options[card_id].supports_evolution
+
+    # Editors should have been updated with the dealt decks
+    assert len(deck0_state) == 1
+    assert len(deck1_state) == 1
+
+
+def test_randomize_duel_evolution_decks_deals_fresh_cards() -> None:
+    app = object.__new__(interface.CRHarnessInterface)
+    app.card_options = interface.load_card_options()
+    deals0 = []
+    deals1 = []
+    app.duel_deck0_editor = SimpleNamespace(set_deck=lambda d, f: deals0.append((d, f)))
+    app.duel_deck1_editor = SimpleNamespace(set_deck=lambda d, f: deals1.append((d, f)))
+
+    app.randomize_duel_evolution_decks()
+
+    assert len(deals0) == 1
+    assert len(deals1) == 1
+    deck0, forms0 = deals0[0]
+    deck1, forms1 = deals1[0]
+    assert len(deck0) == 8 and len(set(deck0)) == 8
+    assert len(deck1) == 8 and len(set(deck1)) == 8
+    assert forms0 == (1,) * 8
+    assert forms1 == (1,) * 8
+
+
+def test_interface_initialization_with_tk() -> None:
+    if interface.tk is None:
+        pytest.skip("Tkinter not available in environment")
+    root = interface.tk.Tk()
+    root.withdraw()
+    try:
+        report = interface.PreflightReport(
+            vm=interface.VmStatus(True, True, True, "vm", "serial", "ready"),
+            memory=interface.MemoryStatus(50.0, 8.0, 16.0),
+            gpu=interface.GpuStatus(True, 10.0, (10.0,), 2000.0, 8000.0, 25.0, "ok"),
+            training_processes=(),
+            warnings=(),
+        )
+        app = interface.CRHarnessInterface(root, preflight=report, log_path=Path("runs/interface/test.log"))
+        root.update()
+        assert app.model_preset_var.get() == interface.MATCH_PRESETS[0].name
+        assert app.duel_preset_var.get() == interface.MATCH_PRESETS[0].name
+        assert app.match_preset_var.get() == interface.MATCH_PRESETS[0].name
+    finally:
+        root.destroy()

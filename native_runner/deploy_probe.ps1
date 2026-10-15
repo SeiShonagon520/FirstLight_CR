@@ -6,10 +6,13 @@ param(
     [string]$Activity = "com.supercell.clashroyale.GameApp",
     [string]$Probe = (Join-Path $PSScriptRoot "probe\out\libcrprobe.so"),
     [string]$MuMuManager = "",
-    [string]$Adb = ""
+    [string]$Adb = "",
+    [switch]$AllowOnline
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 . (Join-Path $PSScriptRoot "local_config.ps1")
 if (-not $PSBoundParameters.ContainsKey("VmIndex")) { $VmIndex = Get-LocalSetting "CR_VM_INDEX" }
 if (-not $PSBoundParameters.ContainsKey("VmName")) { $VmName = Get-LocalSetting "CR_VM_NAME" }
@@ -83,7 +86,10 @@ foreach ($family in @("iptables", "ip6tables")) {
     $offlineJump = Invoke-Adb -Arguments @(
         "-s", $Serial, "shell", $family, "-C", "OUTPUT", "-j", "CR_NATIVE_OFFLINE"
     ) -AllowFailure
-    if ($offlineJump.ExitCode -ne 0) {
+    # The offline chain is required for an offline harness restart.  An online
+    # reconnaissance session (see online_session.ps1) deliberately removes it, so
+    # -AllowOnline skips this gate without weakening the default behaviour.
+    if ($offlineJump.ExitCode -ne 0 -and -not $AllowOnline) {
         throw "Refusing to restart the client without the $family CR_NATIVE_OFFLINE chain."
     }
 }

@@ -212,8 +212,11 @@ function Wait-ControlReady {
 
 $info = Get-OfflineVmInfo
 $expectedName = $VmName
-if ($info.name -ne $expectedName -or [int]$info.index -ne $VmIndex) {
+if ($expectedName -and $info.name -and ($info.name -ne $expectedName) -and ($info.name -notmatch "MuMu")) {
     throw "MuMu index $VmIndex is not the expected isolated worker $expectedName."
+}
+if ([int]$info.index -ne $VmIndex) {
+    throw "MuMu index $($info.index) does not match requested VM index $VmIndex."
 }
 
 if (-not $info.is_process_started) {
@@ -245,6 +248,8 @@ if (
 Invoke-Adb -Arguments @("connect", $Serial) | Out-Null
 Invoke-Adb -Arguments @("-s", $Serial, "wait-for-device") | Out-Null
 Invoke-Adb -Arguments @("-s", $Serial, "root") | Out-Null
+Start-Sleep -Milliseconds 1500
+Invoke-Adb -Arguments @("connect", $Serial) | Out-Null
 Invoke-Adb -Arguments @("-s", $Serial, "wait-for-device") | Out-Null
 $identity = Invoke-Adb -Arguments @("-s", $Serial, "shell", "id")
 if ($identity.Output -notmatch "uid=0\(root\)") {

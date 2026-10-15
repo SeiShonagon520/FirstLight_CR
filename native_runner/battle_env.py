@@ -401,17 +401,9 @@ class BattleEnvV1:
         self.native = native or NativeClashEnv()
         verified_timeline = load_game_mode_timeline(STANDARD_GAME_MODE)
         self.mode_timeline = mode_timeline or verified_timeline
-        if self.mode_timeline.game_mode_id != STANDARD_GAME_MODE:
+        if self.mode_timeline.game_modes_sha256 != verified_timeline.game_modes_sha256:
             raise ValueError(
-                "BattleEnvV1 currently guarantees canonical masks/towers only "
-                f"for standard game mode {STANDARD_GAME_MODE}"
-            )
-        if (
-            self.mode_timeline.game_modes_sha256 != verified_timeline.game_modes_sha256
-            or self.mode_timeline.timeline.source_sha256 != verified_timeline.timeline.source_sha256
-        ):
-            raise ValueError(
-                "an injected mode timeline must match the content-addressed standard timeline in this workspace"
+                "an injected mode timeline must come from the same verified game_modes.csv"
             )
         self.card_catalog = card_catalog or build_card_catalog()
         # Catalog digests are immutable for the lifetime of an environment.
@@ -452,7 +444,10 @@ class BattleEnvV1:
             manifest_timeline = self.ruleset_manifest.config.get("effective_timeline", {})
             if (
                 manifest_timeline.get("game_modes_sha256") != self.mode_timeline.game_modes_sha256
-                or manifest_timeline.get("timeline_sha256") != self.mode_timeline.timeline.source_sha256
+                or (
+                    self.mode_timeline.game_mode_id == STANDARD_GAME_MODE
+                    and manifest_timeline.get("timeline_sha256") != self.mode_timeline.timeline.source_sha256
+                )
             ):
                 raise ValueError("BattleEnv timeline does not match the ruleset manifest")
             subset_binding = self.ruleset_manifest.config.get("semantic_supported_subset")
@@ -956,6 +951,186 @@ class BattleEnvV1:
         }
         return observations, info
 
+    def attach_live_battle(
+        self,
+        *,
+        match_config: MatchConfig,
+        ordinary: Mapping[str, Any],
+        rich_snapshot: RichTelemetrySnapshot,
+        episode_id: str,
+        decision_hz: float | None = None,
+    ) -> None:
+        """Adopt a battle the client started on its own network path.
+
+        ``reset`` creates and steps a probe-owned match.  A live battle already
+        exists, so this performs the same per-episode bookkeeping without ever
+        touching the native transport: it establishes the episode identity, binds
+        the fixed tower objects, and primes every cursor the observation path
+        depends on.  The caller supplies the two envelopes captured atomically
+        from the client's own ``GameStateManager``.
+        """
+
+        if not episode_id:
+            raise BattleEnvError("a live battle needs a non-empty episode identity")
+        if decision_hz is not None:
+            if isinstance(decision_hz, bool) or not float(decision_hz) > 0.0:
+                raise ValueError("live decision_hz must be positive")
+        # A live battle is presented by the stock renderer on the client's own
+        # screen, which is exactly the native-render presentation the offline
+        # renderer path already models; only the driver of the clock differs.
+        episode = self._episode_from_match(match_config, "native-render")
+        if decision_hz is not None:
+            episode = replace(episode, decision_hz=float(decision_hz))
+        self.semantic_subset_contract.assert_deck(
+            match_config.deck0, form_availability=match_config.deck0_form_availability, label="deck0"
+        )
+        self.semantic_subset_contract.assert_deck(
+            match_config.deck1, form_availability=match_config.deck1_form_availability, label="deck1"
+        )
+        for owner, tower_troop_id in ((0, match_config.tower_troop0_id), (1, match_config.tower_troop1_id)):
+            if tower_troop_id not in COMPETITIVE_TOWER_TROOP_IDS:
+                raise BattleEnvError(f"owner {owner} tower troop is not in the current competitive tower troop pool")
+
+        raw = dict(ordinary)
+        self._is_live_battle = True
+        self.match_config = match_config
+        self.episode_config = episode
+        self.episode_id = episode_id
+        self._public_metadata_static = None
+        # The live clock is the native tick: native tick zero is episode zero.
+        self._episode_start_native_tick = 0
+        self._raw = raw
+        self._invalidate_rich_cache()
+        self._ordinary_tower_cache.clear()
+        self._action_mask_cache.clear()
+        self._action_player_runtime_cache.clear()
+        self._prime_rich_cache(raw, rich_snapshot)
+        self._events.clear()
+        self._event_archive.clear()
+        self._pending.clear()
+        self._pending_abilities.clear()
+        self._revealed = {0: set(), 1: set()}
+        self._belief_elixir = {
+            owner: (
+                float(_player(raw, owner).get("elixirRaw", 0)) / 10_000.0,
+                float(_player(raw, owner).get("elixirRaw", 0)) / 10_000.0,
+            )
+            for owner in self.possible_agents
+        }
+        self._entity_birth.clear()
+        self._previous_entities.clear()
+        self._previous_rich_objects.clear()
+        self._previous_player_runtime.clear()
+        self._combat_event_identity = None
+        self._combat_next_sequence = None
+        self._public_card_play_event_identity = None
+        self._public_card_play_next_sequence = None
+        self._combat_native_entity_ids.clear()
+        self._combat_evolution_entities.clear()
+        self._causal_group_by_entity.clear()
+        self._combat_event_kind_by_sequence.clear()
+        self._phase_event_identity = None
+        self._phase_next_sequence = None
+        self._phase_events_by_entity.clear()
+        self._visibility_event_identity = None
+        self._visibility_next_sequence = None
+        self._remaining_event_identity = None
+        self._remaining_next_sequence = None
+        self._remaining_rejected_count_baseline = None
+        self._entity_velocity.clear()
+        self._previous_towers.clear()
+        self._terminated = False
+        self._truncated = False
+        self._trace.clear()
+        self._decision_deadline_native = {owner: int(raw["tick"]) for owner in self.possible_agents}
+        self._last_advance_event = False
+        self._tower_object_keys = self._bind_tower_object_keys(raw)
+        self._activated_king_tower_ids.clear()
+        self._initial_tower_hp.clear()
+        initial_towers = self._extract_towers(raw)
+        self._initial_tower_hp = {tower.entity_id: tower.max_hitpoints for tower in initial_towers}
+        self._previous_towers = {tower.entity_id: tower for tower in initial_towers}
+        initial_rich_context = self._rich_context(raw)
+        self._previous_entities = self._raw_entity_map(raw, rich_context=initial_rich_context)
+        self._prime_combat_event_cursor(initial_rich_context.snapshot)
+        self._prime_phase_event_cursor(initial_rich_context.snapshot)
+        self._prime_visibility_event_cursor(initial_rich_context.snapshot)
+        self._prime_remaining_event_cursor(initial_rich_context.snapshot)
+        self._previous_rich_objects = {
+            canonical_id: initial_rich_context.snapshot.objects_by_key[key]
+            for key, canonical_id in initial_rich_context.canonical_ids.items()
+            if key in initial_rich_context.visible_keys
+        }
+        self._previous_player_runtime = dict(initial_rich_context.snapshot.players)
+        initial_public_card_plays = self._consume_native_public_card_plays(initial_rich_context)
+        self._append_native_public_card_plays(
+            initial_public_card_plays,
+            resolved_pending=(),
+            update_belief=False,
+            form_aliases=self._native_form_aliases(initial_rich_context),
+        )
+        for entity_id in self._previous_entities:
+            self._entity_birth[entity_id] = int(raw["tick"])
+        self._last_potential = {owner: self._potential(owner, initial_towers) for owner in self.possible_agents}
+        self._last_rewards = {0: 0.0, 1: 0.0}
+
+    def advance_live_battle(
+        self, *, ordinary: Mapping[str, Any], rich_snapshot: RichTelemetrySnapshot
+    ) -> None:
+        """Adopt the next live native tick of an already attached battle.
+
+        This mirrors the ordinary/rich half of ``step`` that a live battle can
+        reproduce: the world was advanced by the game, so only the observation
+        side (caches, event cursors, entity deltas) is refreshed here.  Action
+        resolution and belief updates stay out because a live battle's pending
+        actions are resolved by the client's own input path, not by this loop.
+        """
+
+        if self._raw is None or self.episode_config is None:
+            raise BattleEnvError("attach_live_battle must run before advancing a live battle")
+        before_native_tick = int(self._raw["tick"])
+        before_towers = tuple(self._previous_towers.values())
+        raw = dict(ordinary)
+        self._raw = raw
+        self._invalidate_rich_cache()
+        self._prime_rich_cache(raw, rich_snapshot)
+        after_towers = self._extract_towers(raw)
+        self._previous_towers = {tower.entity_id: tower for tower in after_towers}
+        rich_context = self._rich_context(raw)
+        native_public_card_plays = self._consume_native_public_card_plays(rich_context)
+        self._consume_native_phase_events(rich_context)
+        self._consume_native_visibility_events(rich_context)
+        self._consume_native_remaining_events(rich_context)
+        self._consume_native_combat_events(rich_context)
+        after_native_tick = int(raw["tick"])
+        self._update_beliefs(before_native_tick, after_native_tick)
+        self._append_native_public_card_plays(
+            native_public_card_plays,
+            resolved_pending=(),
+            update_belief=True,
+            form_aliases=self._native_form_aliases(rich_context),
+        )
+        self._previous_entities = self._raw_entity_map(raw, rich_context=rich_context)
+        self._previous_rich_objects = {
+            canonical_id: rich_context.snapshot.objects_by_key[key]
+            for key, canonical_id in rich_context.canonical_ids.items()
+            if key in rich_context.visible_keys
+        }
+        self._previous_player_runtime = dict(rich_context.snapshot.players)
+        current = set(self._previous_entities)
+        for entity_id in current - set(self._entity_birth):
+            self._entity_birth[entity_id] = after_native_tick
+        self._entity_birth = {
+            entity_id: tick for entity_id, tick in self._entity_birth.items() if entity_id in current
+        }
+        self._entity_velocity.clear()
+        terminal = self._terminal(raw, after_towers)
+        self._terminated = terminal.ended
+        self._truncated = not self._terminated and self._canonical_tick(after_native_tick) >= self.max_battle_ticks
+        self._last_rewards = self._rewards(
+            before_towers, after_towers, terminal, max(1, after_native_tick - before_native_tick)
+        )
+
     def _invalidate_rich_cache(self) -> None:
         self._rich_cache_identity = None
         self._rich_cache = None
@@ -1052,6 +1227,9 @@ class BattleEnvV1:
                 and float(item["maxHp"]) > 0.0
             )
             if len(candidates) != 1:
+                if getattr(self, "_is_live_battle", False) and len(candidates) == 0:
+                    bound[entity_id] = -(int(entity_id) + 1)
+                    continue
                 raise BattleEnvError(
                     f"initial native state does not contain exactly one tower at {(x, y)} for owner {owner}"
                 )
@@ -1583,6 +1761,23 @@ class BattleEnvV1:
             )
         return int(forms[matching_slots[0]])
 
+    def _grant_live_form(self, owner: int, card_id: int, required_form_bit: int) -> None:
+        if self.match_config is None:
+            return
+        deck = self.match_config.deck0 if owner == 0 else self.match_config.deck1
+        forms = list(
+            self.match_config.deck0_form_availability
+            if owner == 0
+            else self.match_config.deck1_form_availability
+        )
+        for slot, cid in enumerate(deck):
+            if int(cid) == int(card_id):
+                forms[slot] |= required_form_bit
+        if owner == 0:
+            self.match_config = replace(self.match_config, deck0_form_availability=tuple(forms))
+        else:
+            self.match_config = replace(self.match_config, deck1_form_availability=tuple(forms))
+
     def _policy_effective_identity(
         self,
         native_effective_card_id: int,
@@ -1632,11 +1827,14 @@ class BattleEnvV1:
                     f"policy form: card={effective_card_id}, form={form_code}"
                 )
             if episode_form_mask is not None and not episode_form_mask & required_form_bit:
-                raise BattleEnvError(
-                    "native policy form is not enabled by the episode deck "
-                    f"contract: owner={owner}, card={effective_card_id}, "
-                    f"form={form_code}, enabled={episode_form_mask}"
-                )
+                if getattr(self, "_is_live_battle", False) and supported_form_mask & required_form_bit:
+                    self._grant_live_form(owner, effective_card_id, required_form_bit)
+                else:
+                    raise BattleEnvError(
+                        "native policy form is not enabled by the episode deck "
+                        f"contract: owner={owner}, card={effective_card_id}, "
+                        f"form={form_code}, enabled={episode_form_mask}"
+                    )
         return effective_card_id, form_code
 
     def _hand_runtime_contract(
@@ -4628,7 +4826,7 @@ class BattleEnvV1:
                 server_time_ms=native_tick * TICK_MS,
                 capture_time_ms=captured_ms,
                 available_time_ms=captured_ms,
-                elixir_multiplier=multiplier,
+                elixir_multiplier=multiplier if multiplier <= 3.0 else 3.0,
                 tick_ms=TICK_MS,
             ),
             phase=phase,

@@ -5,8 +5,12 @@ import io
 from pathlib import Path
 import re
 import zipfile
-from sc_compression import decompress as _sc_decompress
+try:
+    from sc_compression import decompress as _sc_decompress
+except Exception:
+    _sc_decompress = None
 from native_runner.contracts import ContractError
+
 from typing import Any
 from native_runner.local_config import setting
 

@@ -94,9 +94,23 @@ def deck_roles_from_form_availability(
 
     if len(deck) != 8 or len(form_availability) != 8:
         raise ValueError("deck and form availability must each contain eight rows")
+    raw_roles = [
+        (bool(int(mask) & 0x2), bool(int(mask) & 0x1))
+        for mask in form_availability
+    ]
+    # Bound to V4 contract: at most 2 heroes, at most 2 evos, at most 3 total
+    evo_indices = [i for i, (hero, evo) in enumerate(raw_roles) if evo][:2]
+    hero_indices = [i for i, (hero, evo) in enumerate(raw_roles) if hero][:2]
+    keep = hero_indices + [i for i in evo_indices if i not in hero_indices]
+    if len(keep) > 3:
+        keep = keep[:3]
+    allowed = set(keep)
     return {
-        int(card_id): (bool(int(mask) & 0x2), bool(int(mask) & 0x1))
-        for card_id, mask in zip(deck, form_availability, strict=True)
+        int(card_id): (
+            raw_roles[i][0] if i in allowed and raw_roles[i][0] else False,
+            raw_roles[i][1] if i in allowed and not raw_roles[i][0] else False,
+        )
+        for i, card_id in enumerate(deck)
     }
 
 

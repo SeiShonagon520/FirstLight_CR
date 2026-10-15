@@ -1,4 +1,7 @@
-param([Parameter(ValueFromRemainingArguments = $true)][string[]]$InterfaceArguments)
+param(
+    [switch]$SkipPreflightDialog,
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$InterfaceArguments
+)
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -12,6 +15,7 @@ if ($InterfaceArguments -contains "--diagnose") {
 }
 $pythonw = Get-LocalSetting "CR_PYTHONW"
 $arguments = @("-X", "utf8", "-m", "native_runner.user_interface")
+if ($SkipPreflightDialog) { $arguments += "--skip-preflight-dialog" }
 if ($InterfaceArguments) { $arguments += $InterfaceArguments }
 $quoted = $arguments | ForEach-Object { '"' + ($_ -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"' }
-Start-Process -FilePath $pythonw -ArgumentList ($quoted -join ' ') -WorkingDirectory $repository -WindowStyle Hidden
+Start-Process -FilePath $pythonw -ArgumentList ($quoted -join ' ') -WorkingDirectory $repository
